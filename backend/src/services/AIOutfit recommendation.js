@@ -17,7 +17,7 @@ const {
     FashionTrends
 }
  = require("../database/models");
-const { getWeather } = require("../services/weather.service");
+const WeatherService = require("../services/weather.service");
 
 // ============================================================================
 // ✅ NEURAL PREFERENCE LEARNER
@@ -853,7 +853,7 @@ class AIOutfitRecommendationService {
       let weather = options.weather;
       if (!weather && options.city && options.country) {
         try {
-          weather = await getWeather(options.city, options.country);
+          weather = await WeatherService.getCurrentWeather(options.city, options.country);
           console.log(`✓ Weather: ${weather.temp}°C, ${weather.condition}`);
         } catch (err) {
           console.warn("Weather fetch error:", err.message);

@@ -8,6 +8,7 @@ const {
   validateLogin,
   validatePasswordChange,
   validateProfileUpdate,
+  validateOAuth,
 } = require('../middleware/validators');
 
 /**
@@ -23,6 +24,22 @@ router.post('/register', validateRegister, authController.register);
  * @access  Public
  */
 router.post('/login', validateLogin, authController.login);
+
+/**
+ * @route   POST /api/v1/auth/google
+ * @desc    Sign in/up with a Google ID token (frontend uses Google's own
+ *          SDK to obtain it — see services/oauth.service.js)
+ * @access  Public
+ */
+router.post('/google', validateOAuth, authController.googleAuth);
+
+/**
+ * @route   POST /api/v1/auth/apple
+ * @desc    Sign in/up with an Apple identity token (frontend uses Sign
+ *          in with Apple's own SDK to obtain it)
+ * @access  Public
+ */
+router.post('/apple', validateOAuth, authController.appleAuth);
 
 /**
  * @route   GET /api/v1/auth/profile
@@ -47,16 +64,22 @@ router.post('/change-password', authenticate, validatePasswordChange, authContro
 
 /**
  * @route   POST /api/v1/auth/refresh-token
- * @desc    Refresh JWT token
- * @access  Private
+ * @desc    Exchange a refresh token (cookie or body) for a new access
+ *          token + rotated refresh token.
+ * @access  Public — intentionally NOT behind `authenticate`. The access
+ *          token has usually already expired by the time this is
+ *          called; the refresh token itself (verified inside the
+ *          controller against the Redis allowlist) is the credential.
  */
-router.post('/refresh-token', authenticate, authController.refreshToken);
+router.post('/refresh-token', authController.refreshToken);
 
 /**
  * @route   POST /api/v1/auth/logout
- * @desc    Logout user (client-side token invalidation)
- * @access  Private
+ * @desc    Revoke the caller's refresh token (real server-side logout).
+ * @access  Public — not gated behind `authenticate`: the access token
+ *          may well already be expired when the user logs out, and the
+ *          thing actually being revoked is the refresh token/cookie.
  */
-router.post('/logout', authenticate, authController.logout);
+router.post('/logout', authController.logout);
 
 module.exports = router;

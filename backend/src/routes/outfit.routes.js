@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const OutfitController = require('../controllers/outfit.controller');
-const { authenticateUser } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const { body } = require('express-validator');
 
 // Validation middleware
@@ -54,7 +54,7 @@ const suggestOutfitValidation = [
  */
 router.post(
     '/',
-    authenticateUser,
+    authenticate,
     createOutfitValidation,
     OutfitController.createOutfit
 );
@@ -66,7 +66,7 @@ router.post(
  */
 router.post(
     '/suggest',
-    authenticateUser,
+    authenticate,
     suggestOutfitValidation,
     OutfitController.suggestOutfit
 );
@@ -79,7 +79,7 @@ router.post(
  */
 router.get(
     '/',
-    authenticateUser,
+    authenticate,
     OutfitController.getUserOutfits
 );
 
@@ -90,7 +90,7 @@ router.get(
  */
 router.get(
     '/stats',
-    authenticateUser,
+    authenticate,
     OutfitController.getOutfitStats
 );
 
@@ -102,7 +102,7 @@ router.get(
  */
 router.get(
     '/recommendations/today',
-    authenticateUser,
+    authenticate,
     OutfitController.getTodayOutfit
 );
 
@@ -114,7 +114,7 @@ router.get(
  */
 router.get(
     '/recommendations/tomorrow',
-    authenticateUser,
+    authenticate,
     OutfitController.getTomorrowOutfit
 );
 
@@ -125,7 +125,7 @@ router.get(
  */
 router.post(
     '/recommendations/custom',
-    authenticateUser,
+    authenticate,
     [
         body('date')
             .notEmpty()
@@ -148,7 +148,7 @@ router.post(
  */
 router.get(
     '/:id',
-    authenticateUser,
+    authenticate,
     OutfitController.getOutfitById
 );
 
@@ -159,7 +159,7 @@ router.get(
  */
 router.put(
     '/:id',
-    authenticateUser,
+    authenticate,
     [
         body('name')
             .optional()
@@ -192,7 +192,7 @@ router.put(
  */
 router.delete(
     '/:id',
-    authenticateUser,
+    authenticate,
     OutfitController.deleteOutfit
 );
 
@@ -203,7 +203,7 @@ router.delete(
  */
 router.patch(
     '/:id/favorite',
-    authenticateUser,
+    authenticate,
     OutfitController.toggleFavorite
 );
 
@@ -214,7 +214,7 @@ router.patch(
  */
 router.post(
     '/:id/wear',
-    authenticateUser,
+    authenticate,
     [
         body('wornAt')
             .optional()
@@ -224,11 +224,11 @@ router.post(
     OutfitController.recordWear
 );
 
-router.post('/interactions', authenticateToken, OutfitController.trackInteraction);
+router.post('/interactions', authenticate, OutfitController.trackInteraction);
 
-router.post('/:outfitId/rate', authenticateToken, OutfitController.rateOutfit);
+router.post('/:outfitId/rate', authenticate, OutfitController.rateOutfit);
 
-router.post('/:outfitId/wear', authenticateToken, OutfitController.wearOutfit);
+router.post('/:outfitId/wear', authenticate, OutfitController.wearOutfit);
 
 
 module.exports = router;

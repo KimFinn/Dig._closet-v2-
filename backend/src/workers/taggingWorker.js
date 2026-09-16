@@ -1,0 +1,161 @@
+/**
+ * Tagging worker — consumes jobs from src/queues/taggingQueue.js.
+ *
+ * Run as its own process: `npm run worker` (see package.json). Kept
+ * separate from the API process on purpose, matching PRD §6.2's "worker
+ * pools separated from the API pool" — bursty vision-API calls shouldn't
+ * compete with request latency, and doing this now avoids a refactor
+ * later when Phase 5 actually scales it out.
+ *
+ * For local dev, running `npm run dev` (API) and `npm run worker`
+ * (this file) in two terminals is enough — Bull doesn't care how many
+ * processes call .process(), so this also scales horizontally later by
+ * just running more worker processes against the same Redis.
+ */
+
+require('dotenv').config();
+const axios = require('axios');
+const redis = require('redis');
+
+const logger = require('../utils/logger');
+const { Clothes } = require('../database/models');
+const { taggingQueue } = require('../queues/taggingQueue');
+const { MCPFashionTagger, MCPConfig, VisionProvider } = require('../services/fashionTagger');
+
+const CONCURRENCY = parseInt(process.env.TAGGING_WORKER_CONCURRENCY || '3', 10);
+
+let fashionTaggerInstance = null;
+function getFashionTagger() {
+  if (!fashionTaggerInstance) {
+    const config = new MCPConfig({
+      anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+      openaiApiKey: process.env.OPENAI_API_KEY,
+      redisHost: process.env.REDIS_CLOUD_HOST,
+      redisPort: parseInt(process.env.REDIS_CLOUD_PORT || '6379', 10),
+      redisPassword: process.env.REDIS_CLOUD_PASSWORD,
+      redisUseSSL: process.env.REDIS_TLS === 'true', // see REDIS_TLS note above
+      useCache: true,
+      cacheTTL: 86400,
+      primaryProvider: VisionProvider.ANTHROPIC_CLAUDE,
+      fallbackProviders: [VisionProvider.OPENAI_GPT4, VisionProvider.GOOGLE_VISION],
+    });
+    fashionTaggerInstance = new MCPFashionTagger(config);
+  }
+  return fashionTaggerInstance;
+}
+
+let cacheClient = null;
+async function getCacheClient() {
+  if (!cacheClient) {
+    cacheClient = redis.createClient({
+      socket: {
+        host: process.env.REDIS_CLOUD_HOST || 'localhost',
+        port: parseInt(process.env.REDIS_CLOUD_PORT || '6379', 10),
+        // TLS is an explicit opt-in (REDIS_TLS=true), not inferred from
+                // REDIS_CLOUD_HOST merely being set (that's set in every real
+                // environment, including plain local dev Redis) — the old
+                // inference forced a TLS handshake against a non-TLS local
+                // Redis, which just hangs/retries forever rather than
+                // failing, stalling every request that touches the cache.
+                tls: process.env.REDIS_TLS === 'true',
+        rejectUnauthorized: false,
+      },
+      password: process.env.REDIS_CLOUD_PASSWORD,
+    });
+    cacheClient.on('error', (err) => logger.error('Worker cache error', { message: err.message }));
+    await cacheClient.connect();
+  }
+  return cacheClient;
+}
+
+async function invalidateUserClothesCache(userId) {
+  try {
+    const cache = await getCacheClient();
+    const keys = await cache.keys(`clothes:user:${userId}:*`);
+    if (keys.length > 0) await cache.del(keys);
+  } catch (error) {
+    logger.warn('Worker cache invalidation failed', { message: error.message });
+  }
+}
+
+async function downloadImage(url) {
+  const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
+  return Buffer.from(response.data);
+}
+
+async function processTaggingJob(job) {
+  const { clothesId, userId, imageUrl, mode } = job.data;
+  logger.info('Processing tagging job', { jobId: job.id, clothesId, mode });
+
+  const item = await Clothes.findByPk(clothesId);
+  if (!item) {
+    logger.warn('Tagging job skipped — clothes item no longer exists', { clothesId });
+    return { skipped: true };
+  }
+
+  const imageBuffer = await downloadImage(imageUrl);
+  const tagger = getFashionTagger();
+  const taggingResult = await tagger.tagClothing(imageBuffer, userId, clothesId);
+
+  if (!taggingResult.success) {
+    await item.update({
+      needsManualReview: true,
+      aiMetadata: {
+        status: 'failed',
+        error: taggingResult.error || 'Tagging failed',
+        mode,
+        attemptedAt: new Date().toISOString(),
+      },
+    });
+    await invalidateUserClothesCache(userId);
+    throw new Error(taggingResult.error || 'Tagging failed');
+  }
+
+  const meta = taggingResult.metadata;
+  const tags = [
+    meta.clothingCategory,
+    meta.pattern,
+    meta.formality,
+    ...(Array.isArray(meta.color) ? meta.color : []),
+    ...(Array.isArray(meta.fabric) ? meta.fabric : []),
+  ].filter(Boolean);
+
+  await item.update({
+    type: meta.clothingCategory?.trim() || item.type,
+    color: (Array.isArray(meta.color) ? meta.color[0] : meta.color)?.trim(),
+    pattern: meta.pattern?.trim(),
+    fabric: (Array.isArray(meta.fabric) ? meta.fabric[0] : meta.fabric)?.trim(),
+    season: Array.isArray(meta.season) ? meta.season.join(', ') : meta.season,
+    occasion: Array.isArray(meta.occasion) ? meta.occasion.join(', ') : meta.occasion,
+    brand: meta.brand,
+    tags,
+    aiGeneratedTags: true,
+    aiConfidenceScore: meta.confidenceScore,
+    needsManualReview: (meta.confidenceScore ?? 1) < 0.6,
+    aiMetadata: {
+      status: 'complete',
+      confidence: meta.confidenceScore,
+      provider: taggingResult.providerUsed,
+      cached: taggingResult.cached,
+      mode,
+      taggedAt: new Date().toISOString(),
+    },
+  });
+
+  await invalidateUserClothesCache(userId);
+
+  logger.info('Tagging job complete', { jobId: job.id, clothesId, confidence: meta.confidenceScore });
+  return { success: true };
+}
+
+taggingQueue.process(CONCURRENCY, processTaggingJob);
+logger.info(`Tagging worker started (concurrency: ${CONCURRENCY})`);
+
+process.on('SIGTERM', async () => {
+  await taggingQueue.close();
+  process.exit(0);
+});
+process.on('SIGINT', async () => {
+  await taggingQueue.close();
+  process.exit(0);
+});

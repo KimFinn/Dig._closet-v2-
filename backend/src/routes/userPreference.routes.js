@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const UserPreferencesController = require('../controllers/userPreference.controller');
-const { authenticateUser } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const { body } = require('express-validator');
 
 // Validation middleware
@@ -93,7 +93,7 @@ const preferencesValidation = [
  */
 router.post(
     '/',
-    authenticateUser,
+    authenticate,
     preferencesValidation,
     UserPreferencesController.createOrUpdatePreferences
 );
@@ -105,7 +105,7 @@ router.post(
  */
 router.get(
     '/',
-    authenticateUser,
+    authenticate,
     UserPreferencesController.getPreferences
 );
 
@@ -117,7 +117,7 @@ router.get(
  */
 router.patch(
     '/:section',
-    authenticateUser,
+    authenticate,
     UserPreferencesController.updatePreferenceSection
 );
 
@@ -128,7 +128,7 @@ router.patch(
  */
 router.delete(
     '/',
-    authenticateUser,
+    authenticate,
     UserPreferencesController.deletePreferences
 );
 
@@ -140,7 +140,7 @@ router.delete(
  */
 router.get(
     '/schedule-recommendations',
-    authenticateUser,
+    authenticate,
     UserPreferencesController.getScheduleBasedRecommendations
 );
 
@@ -151,7 +151,7 @@ router.get(
  */
 router.get(
     '/suggestions',
-    authenticateUser,
+    authenticate,
     UserPreferencesController.getPreferenceSuggestions
 );
 
@@ -162,7 +162,7 @@ router.get(
  */
 router.get(
     '/validate',
-    authenticateUser,
+    authenticate,
     UserPreferencesController.validatePreferences
 );
 

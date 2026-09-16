@@ -5,10 +5,9 @@
 // Separates business logic from HTTP layer for better testability
 // ============================================================================
 
-const Trip = require('../model/trip.model');
-const User = require('../model/user.model');
+const { Trip, User } = require('../database/models');
 const { packagingService } = require('./packaging.service');
-const { getWeather, getMultiDayWeather } = require('./weather.service');
+const WeatherService = require('./weather.service');
 const logger = require('../utils/logger');
 
 class TripService {
@@ -358,7 +357,7 @@ class TripService {
 
     try {
       // Use multi-day weather service
-      const weatherData = await getMultiDayWeather(city, country, startDate, endDate);
+      const weatherData = await WeatherService.getMultiDayWeatherForTrip(city, country, startDate, endDate);
       
       const summary = this._generateWeatherSummary(weatherData, startDate, endDate);
 

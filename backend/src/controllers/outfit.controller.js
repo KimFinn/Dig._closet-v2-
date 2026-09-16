@@ -38,7 +38,13 @@ async function getCacheClient() {
             socket: {
                 host: process.env.REDIS_CLOUD_HOST || 'localhost',
                 port: parseInt(process.env.REDIS_CLOUD_PORT || 6379),
-                tls: process.env.REDIS_CLOUD_HOST ? true : false,
+                // TLS is an explicit opt-in (REDIS_TLS=true), not inferred from
+                // REDIS_CLOUD_HOST merely being set (that's set in every real
+                // environment, including plain local dev Redis) — the old
+                // inference forced a TLS handshake against a non-TLS local
+                // Redis, which just hangs/retries forever rather than
+                // failing, stalling every request that touches the cache.
+                tls: process.env.REDIS_TLS === 'true',
                 rejectUnauthorized: false
             },
             password: process.env.REDIS_CLOUD_PASSWORD
@@ -248,7 +254,7 @@ class OutfitController {
         const startTime = Date.now();
         
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             // Validate with Joi
             const { error, value } = validationSchemas.createOutfit.validate(req.body);
@@ -300,7 +306,7 @@ class OutfitController {
             logger.error('❌ Error creating outfit:', {
                 error: error.message,
                 stack: error.stack,
-                userId: req.user?.id
+                userId: req.user?.userId
             });
             next(error);
         }
@@ -314,7 +320,7 @@ class OutfitController {
      */
     static async createOutfitsBatch(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
             const { outfits } = req.body;
 
             // Validate batch
@@ -416,7 +422,7 @@ class OutfitController {
         const startTime = Date.now();
         
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             // Validate with Joi
             const { error, value } = validationSchemas.suggestOutfit.validate(req.body);
@@ -488,7 +494,7 @@ class OutfitController {
             logger.error("❌ Error generating outfit suggestion", {
                 error: error.message,
                 stack: error.stack,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 occasion: req.body?.occasion
             });
             next(error);
@@ -509,7 +515,7 @@ class OutfitController {
         const startTime = Date.now();
         
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             // Validate query parameters with Joi
             const { error, value } = validationSchemas.queryFilters.validate(req.query);
@@ -593,7 +599,7 @@ class OutfitController {
             logger.error("❌ Error fetching user outfits", {
                 error: error.message,
                 stack: error.stack,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 query: req.query
             });
             next(error);
@@ -612,7 +618,7 @@ class OutfitController {
     static async getOutfitById(req, res, next) {
         try {
             const { id } = req.params;
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             // Check cache
             const cacheKey = `outfit:${id}`;
@@ -653,7 +659,7 @@ class OutfitController {
             logger.error("❌ Error fetching outfit by ID", {
                 error: error.message,
                 stack: error.stack,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 outfitId: req.params?.id
             });
             next(error);
@@ -673,7 +679,7 @@ class OutfitController {
     static async updateOutfit(req, res, next) {
         try {
             const { id } = req.params;
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             // Validate update data
             const { error, value } = validationSchemas.updateOutfit.validate(req.body);
@@ -730,7 +736,7 @@ class OutfitController {
             logger.error("❌ Error updating outfit", {
                 error: error.message,
                 stack: error.stack,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 outfitId: req.params?.id
             });
             next(error);
@@ -749,7 +755,7 @@ class OutfitController {
     static async deleteOutfit(req, res, next) {
         try {
             const { id } = req.params;
-            const userId = req.user.id;
+            const userId = req.user.userId;
             const { permanent = 'false' } = req.query;
 
             // Verify ownership first
@@ -791,7 +797,7 @@ class OutfitController {
             logger.error("❌ Error deleting outfit", {
                 error: error.message,
                 stack: error.stack,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 outfitId: req.params?.id
             });
             next(error);
@@ -808,7 +814,7 @@ class OutfitController {
      */
     static async toggleFavorite(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
             const { id } = req.params;
 
             // Verify ownership
@@ -843,7 +849,7 @@ class OutfitController {
             logger.error("❌ Error toggling outfit favorite status", {
                 error: error.message,
                 stack: error.stack,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 outfitId: req.params?.id
             });
             next(error);
@@ -861,7 +867,7 @@ class OutfitController {
     static async recordWear(req, res, next) {
         try {
             const { id } = req.params;
-            const userId = req.user.id;
+            const userId = req.user.userId;
             const { wornAt } = req.body;
 
             // Verify ownership
@@ -897,7 +903,7 @@ class OutfitController {
             logger.error("❌ Error recording outfit wear", {
                 error: error.message,
                 stack: error.stack,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 outfitId: req.params?.id
             });
             next(error);
@@ -914,7 +920,7 @@ class OutfitController {
      */
     static async getTodayOutfit(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
             const { activity = "casual", location } = req.query;
 
             // Check cache (6 hour TTL for daily recommendations)
@@ -961,7 +967,7 @@ class OutfitController {
             logger.error("❌ Error fetching today's outfit recommendation", {
                 error: err.message,
                 stack: err.stack,
-                userId: req.user?.id,
+                userId: req.user?.userId,
             });
             next(err);
         }
@@ -977,7 +983,7 @@ class OutfitController {
      */
     static async getTomorrowOutfit(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
             const { activity = "casual", tripId, location } = req.query;
 
             // Handle trip if provided
@@ -1036,7 +1042,7 @@ class OutfitController {
             logger.error("❌ Error fetching tomorrow's outfit recommendation", {
                 error: err.message,
                 stack: err.stack,
-                userId: req.user?.id,
+                userId: req.user?.userId,
             });
             next(err);
         }
@@ -1053,7 +1059,7 @@ class OutfitController {
      */
     static async getCustomOutfit(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             // Validate with Joi
             const { error, value } = validationSchemas.customRecommendation.validate(req.body);
@@ -1126,7 +1132,7 @@ class OutfitController {
             logger.error("❌ Error fetching custom outfit recommendation", {
                 error: err.message,
                 stack: err.stack,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 date: req.body?.date
             });
             next(err);
@@ -1143,7 +1149,7 @@ class OutfitController {
      */
     static async getOutfitStats(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             // Check cache
             const cacheKey = `outfits:stats:${userId}`;
@@ -1169,7 +1175,7 @@ class OutfitController {
             logger.error("❌ Error fetching outfit statistics", {
                 error: error.message,
                 stack: error.stack,
-                userId: req.user?.id,
+                userId: req.user?.userId,
             });
             next(error);
         }
@@ -1183,7 +1189,7 @@ class OutfitController {
      */
     static async getOutfitAnalytics(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             // Check cache
             const cacheKey = `outfits:analytics:${userId}`;
@@ -1224,7 +1230,7 @@ class OutfitController {
         try {
             const { id: outfitId } = req.params;
             const { action, durationSeconds, context } = req.body;
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             // Verify outfit exists and ownership
             const outfit = await OutfitService.getOutfitById(outfitId, userId);
@@ -1265,7 +1271,7 @@ class OutfitController {
     static async rateOutfit(req, res, next) {
         try {
             const { id: outfitId } = req.params;
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             // Validate rating data
             const { error, value } = validationSchemas.rateOutfit.validate(req.body);
@@ -1324,7 +1330,7 @@ class OutfitController {
     static async wearOutfit(req, res, next) {
         try {
             const { id: outfitId } = req.params;
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             // Verify ownership
             const outfit = await Outfit.findOne({

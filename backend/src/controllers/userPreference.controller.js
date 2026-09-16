@@ -19,7 +19,7 @@ class UserPreferencesController {
                 });
             }
 
-            const userId = req.user.id;
+            const userId = req.user.userId;
             const {
                 // Style preferences
                 stylePersona,
@@ -156,7 +156,7 @@ class UserPreferencesController {
             logger.error('Error creating/updating preferences:', {
                 error: error.message,
                 stack: error.stack,
-                userId: req.user?.id
+                userId: req.user?.userId
             });
             next(error);
         }
@@ -168,7 +168,7 @@ class UserPreferencesController {
      */
     static async getPreferences(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             const preferences = await UserPreferences.findOne({
                 where: { userId }
@@ -195,7 +195,7 @@ class UserPreferencesController {
         } catch (error) {
             logger.error('Error fetching preferences:', {
                 error: error.message,
-                userId: req.user?.id
+                userId: req.user?.userId
             });
             next(error);
         }
@@ -207,7 +207,7 @@ class UserPreferencesController {
      */
     static async updatePreferenceSection(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
             const { section } = req.params;
 
             const validSections = [
@@ -304,7 +304,7 @@ class UserPreferencesController {
         } catch (error) {
             logger.error('Error updating preference section:', {
                 error: error.message,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 section: req.params.section
             });
             next(error);
@@ -317,7 +317,7 @@ class UserPreferencesController {
      */
     static async deletePreferences(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             const preferences = await UserPreferences.findOne({
                 where: { userId }
@@ -345,7 +345,7 @@ class UserPreferencesController {
         } catch (error) {
             logger.error('Error deleting preferences:', {
                 error: error.message,
-                userId: req.user?.id
+                userId: req.user?.userId
             });
             next(error);
         }
@@ -357,7 +357,7 @@ class UserPreferencesController {
      */
     static async getScheduleBasedRecommendations(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
             const { date } = req.query;
 
             const preferences = await UserPreferences.findOne({
@@ -398,7 +398,7 @@ class UserPreferencesController {
         } catch (error) {
             logger.error('Error generating schedule recommendations:', {
                 error: error.message,
-                userId: req.user?.id
+                userId: req.user?.userId
             });
             next(error);
         }
@@ -462,7 +462,7 @@ class UserPreferencesController {
      */
     static async validatePreferences(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
 
             const preferences = await UserPreferences.findOne({
                 where: { userId }
@@ -490,7 +490,7 @@ class UserPreferencesController {
         } catch (error) {
             logger.error('Error validating preferences:', {
                 error: error.message,
-                userId: req.user?.id
+                userId: req.user?.userId
             });
             next(error);
         }

@@ -22,6 +22,7 @@ const { Op } = require('sequelize');
 const logger = require('../utils/logger');
 const cloudinary = require('../configurations/cloudinary');
 const { MCPFashionTagger, MCPConfig, VisionProvider } = require('../services/fashionTagger');
+const { enqueueTaggingJob } = require('../queues/taggingQueue');
 const redis = require('redis');
 const Joi = require('joi'); // For request validation
 
@@ -41,7 +42,13 @@ async function getCacheClient() {
             socket: {
                 host: process.env.REDIS_CLOUD_HOST || 'localhost',
                 port: parseInt(process.env.REDIS_CLOUD_PORT || 6379),
-                tls: process.env.REDIS_CLOUD_HOST ? true : false,
+                // TLS is an explicit opt-in (REDIS_TLS=true), not inferred from
+                // REDIS_CLOUD_HOST merely being set (that's set in every real
+                // environment, including plain local dev Redis) — the old
+                // inference forced a TLS handshake against a non-TLS local
+                // Redis, which just hangs/retries forever rather than
+                // failing, stalling every request that touches the cache.
+                tls: process.env.REDIS_TLS === 'true',
                 rejectUnauthorized: false
             },
             password: process.env.REDIS_CLOUD_PASSWORD
@@ -107,7 +114,7 @@ function getFashionTagger() {
             redisHost: process.env.REDIS_CLOUD_HOST,
             redisPort: parseInt(process.env.REDIS_CLOUD_PORT || 6379),
             redisPassword: process.env.REDIS_CLOUD_PASSWORD,
-            redisUseSSL: true,
+            redisUseSSL: process.env.REDIS_TLS === 'true', // see REDIS_TLS note above
             useCache: true,
             cacheTTL: 86400,
             primaryProvider: VisionProvider.ANTHROPIC_CLAUDE,
@@ -124,8 +131,13 @@ function getFashionTagger() {
 // ============================================================================
 
 const validationSchemas = {
+    // `userId` was previously required here and taken straight from the
+    // client-supplied request body (see uploadClothingItem below) — any
+    // authenticated caller could upload an item onto ANY OTHER user's
+    // account just by putting a different id in the form data. It's no
+    // longer part of this schema at all: the owner is always the
+    // authenticated caller (`req.user.userId`, verified by the JWT).
     uploadClothing: Joi.object({
-        userId: Joi.string().required(),
         size: Joi.string().max(10).optional(),
         purchasePrice: Joi.number().min(0).max(999999).optional(),
         purchaseDate: Joi.date().max('now').optional(),
@@ -165,8 +177,18 @@ const validationSchemas = {
 
 /**
  * Process single clothing item (used by both single and batch upload)
+ *
+ * Phase 0 fix: this used to `await tagger.tagClothing(...)` — the vision
+ * API call — inline, blocking the HTTP response for however long that
+ * took (worse for batch: up to 20 of these in parallel on one request).
+ * `bull`/`ioredis` were already dependencies but nothing used them. Now
+ * this only does the fast part (Cloudinary upload + a placeholder DB
+ * row) and hands the slow part to the tagging queue
+ * (src/queues/taggingQueue.js -> src/workers/taggingWorker.js), so the
+ * request returns as soon as the item exists, with tagging still in
+ * progress.
  */
-async function processSingleClothingItem(file, itemData, tagger) {
+async function processSingleClothingItem(file, itemData) {
     const { userId, size, purchasePrice, purchaseDate, notes } = itemData;
 
     try {
@@ -191,85 +213,34 @@ async function processSingleClothingItem(file, itemData, tagger) {
 
         logger.info(`✅ Cloudinary upload: ${cloudinaryResult.public_id}`);
 
-        // AI Tagging
-        let aiData = {
-            type: null,
-            color: null,
-            pattern: null,
-            fabric: null,
-            season: null,
-            occasion: null,
-            brand: null,
-            tags: [],
-            aiConfidence: 0.0,
-            providerUsed: 'none',
-            cached: false
-        };
-
-        try {
-            const taggingResult = await tagger.tagClothing(
-                file.buffer,
-                userId,
-                cloudinaryResult.public_id
-            );
-
-            if (taggingResult.success) {
-                const meta = taggingResult.metadata;
-                aiData = {
-                    type: meta.clothingCategory,
-                    color: Array.isArray(meta.color) ? meta.color[0] : meta.color,
-                    pattern: meta.pattern,
-                    fabric: Array.isArray(meta.fabric) ? meta.fabric[0] : meta.fabric,
-                    season: Array.isArray(meta.season) ? meta.season.join(', ') : meta.season,
-                    occasion: Array.isArray(meta.occasion) ? meta.occasion.join(', ') : meta.occasion,
-                    brand: meta.brand,
-                    tags: [
-                        meta.clothingCategory,
-                        meta.pattern,
-                        meta.formality,
-                        ...(Array.isArray(meta.color) ? meta.color : []),
-                        ...(Array.isArray(meta.fabric) ? meta.fabric : [])
-                    ].filter(Boolean),
-                    aiConfidence: meta.confidenceScore,
-                    providerUsed: taggingResult.providerUsed,
-                    cached: taggingResult.cached
-                };
-
-                logger.info(`✅ AI tagging: ${aiData.type} (${aiData.providerUsed}, cached: ${aiData.cached})`);
-            }
-        } catch (aiError) {
-            logger.warn('⚠️ AI tagging failed:', aiError.message);
-        }
-
-        if (!aiData.type) {
-            throw new Error('Clothing type could not be determined');
-        }
-
-        // Create database entry
+        // Create a placeholder record immediately — `type` can't be null
+        // per the schema, so 'untagged' is an explicit sentinel the
+        // worker overwrites once tagging completes (or flags for manual
+        // review if tagging fails).
         const newClothingItem = await Clothes.create({
             userId,
-            type: aiData.type?.trim(),
-            color: aiData.color?.trim(),
-            pattern: aiData.pattern?.trim(),
-            fabric: aiData.fabric?.trim(),
-            season: aiData.season?.trim(),
-            occasion: aiData.occasion?.trim(),
-            brand: aiData.brand?.trim(),
+            type: 'untagged',
             size: size?.trim(),
             purchasePrice: purchasePrice ? parseFloat(purchasePrice) : null,
             purchaseDate: purchaseDate || null,
             notes: notes?.trim(),
             imageUrl: cloudinaryResult.secure_url,
             cloudinaryPublicId: cloudinaryResult.public_id,
-            tags: aiData.tags,
+            tags: [],
             isActive: true,
             wearCount: 0,
+            needsManualReview: false,
             aiMetadata: {
-                confidence: aiData.aiConfidence,
-                provider: aiData.providerUsed,
-                cached: aiData.cached,
-                taggedAt: new Date().toISOString()
+                status: 'queued',
+                queuedAt: new Date().toISOString()
             }
+        });
+
+        await enqueueTaggingJob({
+            clothesId: newClothingItem.id,
+            userId,
+            imageUrl: cloudinaryResult.secure_url,
+            mode: 'initial'
         });
 
         // Invalidate user's clothing list cache
@@ -278,11 +249,7 @@ async function processSingleClothingItem(file, itemData, tagger) {
         return {
             success: true,
             item: newClothingItem,
-            aiMetadata: {
-                provider: aiData.providerUsed,
-                cached: aiData.cached,
-                confidence: aiData.aiConfidence
-            }
+            aiMetadata: { status: 'queued' }
         };
 
     } catch (error) {
@@ -315,6 +282,7 @@ class ClothesController {
 
         try {
             const { file } = req;
+            const userId = req.user.userId;
 
             // Validate request body
             const { error, value } = validationSchemas.uploadClothing.validate(req.body);
@@ -351,8 +319,7 @@ class ClothesController {
                 });
             }
 
-            const tagger = getFashionTagger();
-            const result = await processSingleClothingItem(file, value, tagger);
+            const result = await processSingleClothingItem(file, { ...value, userId });
 
             if (!result.success) {
                 return res.status(400).json({
@@ -362,11 +329,15 @@ class ClothesController {
             }
 
             const processingTime = Date.now() - startTime;
-            logger.info(`✅ Upload completed in ${processingTime}ms`);
+            logger.info(`✅ Upload accepted in ${processingTime}ms, tagging queued`);
 
-            res.status(201).json({
+            // 202 Accepted, not 201: the item exists but AI tagging is
+            // still running in the background (see taggingWorker.js).
+            // Poll GET /api/clothes/:itemId — aiMetadata.status flips
+            // from 'queued' to 'complete' (or 'failed') when it's done.
+            res.status(202).json({
                 success: true,
-                message: 'Clothing item uploaded successfully',
+                message: 'Clothing item created, AI tagging in progress',
                 data: {
                     clothingItem: result.item,
                     aiMetadata: result.aiMetadata,
@@ -389,19 +360,14 @@ class ClothesController {
     async uploadBatchClothingItems(req, res, next) {
         try {
             const { files } = req;
-            const { userId } = req.body;
+            // Same fix as uploadClothingItem: the owner is the
+            // authenticated caller, never a client-supplied body field.
+            const userId = req.user.userId;
 
             if (!files || files.length === 0) {
                 return res.status(400).json({
                     success: false,
                     message: 'No image files uploaded'
-                });
-            }
-
-            if (!userId) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'User ID is required'
                 });
             }
 
@@ -412,24 +378,26 @@ class ClothesController {
                 });
             }
 
-            const tagger = getFashionTagger();
             logger.info(`📦 Starting batch upload: ${files.length} items`);
 
-            // Process in parallel
+            // Process in parallel — safe to parallelize now that each call
+            // only does the Cloudinary upload + placeholder row + queue
+            // enqueue, not the vision-API tagging call itself (that runs
+            // in the background worker, one job per item).
             const results = await Promise.all(
-                files.map(file => processSingleClothingItem(file, { userId }, tagger))
+                files.map(file => processSingleClothingItem(file, { userId }))
             );
 
             const successful = results.filter(r => r.success);
             const failed = results.filter(r => !r.success);
 
-            logger.info(`✅ Batch complete: ${successful.length}/${files.length} successful`);
+            logger.info(`✅ Batch accepted: ${successful.length}/${files.length}, tagging queued`);
 
-            const statusCode = failed.length > 0 ? 207 : 201;
+            const statusCode = failed.length > 0 ? 207 : 202;
 
             res.status(statusCode).json({
                 success: true,
-                message: `Batch upload complete: ${successful.length}/${files.length} items uploaded`,
+                message: `Batch upload accepted: ${successful.length}/${files.length} items created, AI tagging in progress`,
                 data: {
                     successful: successful.map(r => ({
                         item: r.item,
@@ -497,6 +465,17 @@ class ClothesController {
                 return res.status(400).json({
                     success: false,
                     message: 'User ID is required'
+                });
+            }
+
+            // This endpoint used to trust the :userId route param outright
+            // — any authenticated user could list ANY other user's whole
+            // wardrobe just by putting a different id in the URL. The
+            // only legitimate value here is the caller's own id.
+            if (userId !== req.user.userId) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'You do not have permission to view this wardrobe'
                 });
             }
 
@@ -579,7 +558,12 @@ class ClothesController {
     async getClothingItemById(req, res, next) {
         try {
             const { itemId } = req.params;
-            const { userId } = req.query;
+            // Ownership used to be verified against a client-supplied
+            // ?userId= query param, and only "if provided" — omitting it
+            // entirely (or passing someone else's item's real owner id)
+            // bypassed the check completely. The only trustworthy value
+            // is the authenticated caller's own id.
+            const userId = req.user.userId;
 
             if (!itemId) {
                 return res.status(400).json({
@@ -593,8 +577,7 @@ class ClothesController {
             const cachedItem = await getCachedData(cacheKey);
 
             if (cachedItem) {
-                // Verify ownership if userId provided
-                if (userId && cachedItem.userId !== userId) {
+                if (cachedItem.userId !== userId) {
                     return res.status(403).json({
                         success: false,
                         message: 'Access denied'
@@ -608,13 +591,10 @@ class ClothesController {
                 });
             }
 
-            // Query database
-            const whereConditions = { id: itemId };
-            if (userId) {
-                whereConditions.userId = userId;
-            }
-
-            const clothingItem = await Clothes.findOne({ where: whereConditions });
+            // Query database — scope by owner directly rather than
+            // fetch-then-compare, so someone else's item 404s instead of
+            // leaking that the id exists at all.
+            const clothingItem = await Clothes.findOne({ where: { id: itemId, userId } });
 
             if (!clothingItem) {
                 return res.status(404).json({
@@ -652,7 +632,7 @@ class ClothesController {
     async updateClothingItem(req, res, next) {
         try {
             const { itemId } = req.params;
-            const { userId } = req.body;
+            const userId = req.user.userId;
 
             if (!itemId) {
                 return res.status(400).json({
@@ -681,8 +661,12 @@ class ClothesController {
                 });
             }
 
-            // Verify ownership - FIXED: proper ownership check
-            if (userId && existingItem.userId !== userId) {
+            // Verify ownership. This used to be `if (userId && ...)` —
+            // a client that simply left userId out of the request body
+            // skipped the check entirely and could edit anyone's item.
+            // The authenticated caller's id is always present, so the
+            // check is now unconditional.
+            if (existingItem.userId !== userId) {
                 return res.status(403).json({
                     success: false,
                     message: 'You do not have permission to update this item'
@@ -746,7 +730,8 @@ class ClothesController {
     async deleteClothingItem(req, res, next) {
         try {
             const { itemId } = req.params;
-            const { userId, permanent = 'false' } = req.query;
+            const { permanent = 'false' } = req.query;
+            const userId = req.user.userId;
 
             if (!itemId) {
                 return res.status(400).json({
@@ -765,8 +750,10 @@ class ClothesController {
                 });
             }
 
-            // Verify ownership
-            if (userId && item.userId !== userId) {
+            // Verify ownership — permanent, irreversible delete is
+            // exactly the operation this bug (skippable by omitting
+            // ?userId=) should never have been guarding this loosely.
+            if (item.userId !== userId) {
                 return res.status(403).json({
                     success: false,
                     message: 'Access denied'
@@ -834,7 +821,6 @@ class ClothesController {
     async searchClothingItems(req, res, next) {
         try {
             const {
-                userId,
                 query,
                 tags,
                 minWearCount,
@@ -842,13 +828,10 @@ class ClothesController {
                 page = 1,
                 limit = 20
             } = req.query;
-
-            if (!userId) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'User ID is required'
-                });
-            }
+            // Search always scopes to the authenticated caller's own
+            // wardrobe — this used to take userId from the query string,
+            // letting anyone search anyone else's closet.
+            const userId = req.user.userId;
 
             // Check cache
             const cacheKey = `clothes:search:${userId}:${JSON.stringify(req.query)}`;
@@ -944,7 +927,7 @@ class ClothesController {
     async recordWear(req, res, next) {
         try {
             const { itemId } = req.params;
-            const { userId } = req.body;
+            const userId = req.user.userId;
 
             const item = await Clothes.findByPk(itemId);
 
@@ -955,8 +938,10 @@ class ClothesController {
                 });
             }
 
-            // Verify ownership
-            if (userId && item.userId !== userId) {
+            // Verify ownership — was conditional on a client-supplied
+            // userId, so omitting it let anyone mark anyone else's item
+            // as worn. Always enforced now.
+            if (item.userId !== userId) {
                 return res.status(403).json({
                     success: false,
                     message: 'Access denied'
@@ -998,6 +983,16 @@ class ClothesController {
     async getWardrobeAnalytics(req, res, next) {
         try {
             const { userId } = req.params;
+
+            // Same IDOR fix as getClothingItems — analytics for someone
+            // else's wardrobe is not yours to see just by changing the
+            // URL.
+            if (userId !== req.user.userId) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'You do not have permission to view this data'
+                });
+            }
 
             // Check cache
             const cacheKey = `clothes:analytics:${userId}`;
@@ -1105,6 +1100,64 @@ class ClothesController {
     }
 
     /**
+     * Re-run AI tagging on an existing item
+     * @route POST /api/clothes/:id/retag
+     *
+     * Phase 0 fix: this route existed (clothes.routes.js) but the
+     * controller method never did — `clothesController.retagClothingItem`
+     * was undefined, which crashed Express at require() time
+     * (`Route.post() requires a callback function but got undefined`),
+     * taking down the whole app's boot, not just this endpoint. This is
+     * a real implementation, not a stub: it reuses the same tagging
+     * queue the upload flow now uses, since re-tagging is mechanically
+     * identical to initial tagging (fetch the existing image, enqueue a
+     * job), just triggered by a different event.
+     */
+    async retagClothingItem(req, res, next) {
+        try {
+            const { id } = req.params;
+            const userId = req.user.userId;
+
+            const item = await Clothes.findOne({ where: { id, userId } });
+
+            if (!item) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Clothing item not found'
+                });
+            }
+
+            await item.update({
+                needsManualReview: false,
+                aiMetadata: {
+                    ...(item.aiMetadata || {}),
+                    status: 'queued',
+                    queuedAt: new Date().toISOString()
+                }
+            });
+
+            await enqueueTaggingJob({
+                clothesId: item.id,
+                userId,
+                imageUrl: item.imageUrl,
+                mode: 'retag'
+            });
+
+            await invalidateCache(`clothes:user:${userId}:*`);
+
+            res.status(202).json({
+                success: true,
+                message: 'Re-tagging queued',
+                data: { clothingItem: item }
+            });
+
+        } catch (error) {
+            logger.error('Error queueing retag:', error);
+            next(error);
+        }
+    }
+
+    /**
  * Get items needing manual review
  * @route GET /api/clothes/review/needed/:userId
  */
@@ -1112,7 +1165,15 @@ async getItemsNeedingReview(req, res, next) {
     try {
         const { userId } = req.params;
         const { page = 1, limit = 20 } = req.query;
-        
+
+        // Same IDOR fix as the other /:userId routes above.
+        if (userId !== req.user.userId) {
+            return res.status(403).json({
+                success: false,
+                message: 'You do not have permission to view this data'
+            });
+        }
+
         const offset = (parseInt(page) - 1) * parseInt(limit);
         
         const { count, rows: items } = await Clothes.findAndCountAll({

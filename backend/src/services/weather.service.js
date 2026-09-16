@@ -1,4 +1,5 @@
 const axios = require("axios");
+const Redis = require('ioredis');
 const logger = require('../utils/logger');
 
 const API_KEY = process.env.WEATHER_API_KEY;
@@ -6,10 +7,46 @@ const OPENWEATHER_BASE_URL = 'https://api.openweathermap.org/data/2.5';
 
 // OpenWeather free tier: 5-day forecast only
 // For 6-16 days, we'll use historical averages or climate data
-const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
+const CACHE_DURATION_MS = 30 * 60 * 1000; // 30 minutes
+const CACHE_DURATION_SEC = CACHE_DURATION_MS / 1000;
+const CACHE_KEY_PREFIX = 'weather:';
 
-// Simple in-memory cache
-const weatherCache = new Map();
+// Phase 0 fix: this was `new Map()` — an in-memory cache that's empty
+// again on every restart and isn't shared across instances, which is
+// exactly the problem once this API runs as more than one process
+// (PRD §6.2's stateless multi-instance API). ioredis was already a
+// dependency but nothing required it anywhere. Using Redis's own key
+// TTL (SET ... EX) also replaces the manual timestamp/_isCacheValid
+// bookkeeping the Map version needed.
+const redisClient = new Redis({
+    host: process.env.REDIS_CLOUD_HOST || 'localhost',
+    port: parseInt(process.env.REDIS_CLOUD_PORT || '6379', 10),
+    password: process.env.REDIS_CLOUD_PASSWORD || undefined,
+    lazyConnect: false,
+    maxRetriesPerRequest: 2,
+});
+
+redisClient.on('error', (err) => {
+    logger.error('Weather cache Redis error', { message: err.message });
+});
+
+async function cacheGet(key) {
+    try {
+        const raw = await redisClient.get(CACHE_KEY_PREFIX + key);
+        return raw ? JSON.parse(raw) : null;
+    } catch (error) {
+        logger.warn('Weather cache get failed, treating as miss', { message: error.message });
+        return null;
+    }
+}
+
+async function cacheSet(key, data) {
+    try {
+        await redisClient.set(CACHE_KEY_PREFIX + key, JSON.stringify(data), 'EX', CACHE_DURATION_SEC);
+    } catch (error) {
+        logger.warn('Weather cache set failed', { message: error.message });
+    }
+}
 
 class WeatherService {
     /**
@@ -17,10 +54,20 @@ class WeatherService {
      */
     static validateApiKey() {
         if (!API_KEY) {
-            logger.error('Weather API key not configured');
-            throw new Error('WEATHER_API_KEY environment variable is required');
+            // Phase 0 fix: this used to throw and crash the whole app at
+            // require() time (server.js -> routes/index.js -> outfit/trip
+            // routes -> this module), so booting locally required a real
+            // OpenWeatherMap key before you could even reach an unrelated
+            // endpoint. Warn instead; individual weather calls already
+            // fall back to seasonal-average data (see
+            // _generateFallbackWeatherForDate) when the real API can't be
+            // reached, so a missing key degrades gracefully instead of
+            // blocking boot.
+            logger.warn('WEATHER_API_KEY not configured — weather calls will use seasonal-average fallback data, not live forecasts.');
+            return false;
         }
         logger.info('Weather service initialized successfully');
+        return true;
     }
 
     /**
@@ -33,12 +80,14 @@ class WeatherService {
     }
 
     /**
-     * Check if cached data is still valid
+     * Check if cached data is still valid.
+     * Redis itself expires the key after CACHE_DURATION_SEC (see cacheGet
+     * / cacheSet above), so presence already implies freshness — this
+     * just guards against a null/missing entry.
      * @private
      */
     static _isCacheValid(cacheEntry) {
-        if (!cacheEntry) return false;
-        return Date.now() - cacheEntry.timestamp < CACHE_DURATION;
+        return !!cacheEntry;
     }
 
     /**
@@ -55,8 +104,8 @@ class WeatherService {
 
             // Check cache first
             const cacheKey = this._getCacheKey(city, country, 'current');
-            const cached = weatherCache.get(cacheKey);
-            
+            const cached = await cacheGet(cacheKey);
+
             if (this._isCacheValid(cached)) {
                 logger.info('Weather cache hit', { city, country, type: 'current' });
                 return cached.data;
@@ -123,7 +172,7 @@ class WeatherService {
             };
 
             // Cache the result
-            weatherCache.set(cacheKey, {
+            await cacheSet(cacheKey, {
                 data: weatherData,
                 timestamp: Date.now()
             });
@@ -177,8 +226,8 @@ class WeatherService {
 
             // Check cache
             const cacheKey = this._getCacheKey(city, country, 'forecast', start);
-            const cached = weatherCache.get(cacheKey);
-            
+            const cached = await cacheGet(cacheKey);
+
             if (this._isCacheValid(cached) && cached.data.durationDays === daysDiff) {
                 logger.info('Weather forecast cache hit', { city, country, days: daysDiff });
                 return cached.data;
@@ -249,7 +298,7 @@ class WeatherService {
             }
 
             // Cache the result
-            weatherCache.set(cacheKey, {
+            await cacheSet(cacheKey, {
                 data: forecastData,
                 timestamp: Date.now()
             });
@@ -590,31 +639,25 @@ class WeatherService {
     }
 
     /**
-     * Clear weather cache (useful for testing or manual refresh)
+     * Clear weather cache (useful for testing or manual refresh).
+     * Now async (Redis-backed) — callers need `await`.
      */
-    static clearCache() {
-        weatherCache.clear();
-        logger.info('Weather cache cleared');
+    static async clearCache() {
+        const keys = await redisClient.keys(`${CACHE_KEY_PREFIX}*`);
+        if (keys.length > 0) await redisClient.del(keys);
+        logger.info('Weather cache cleared', { keysRemoved: keys.length });
     }
 
     /**
-     * Get cache statistics
+     * Get cache statistics. Now async (Redis-backed) — callers need `await`.
      */
-    static getCacheStats() {
+    static async getCacheStats() {
+        const keys = await redisClient.keys(`${CACHE_KEY_PREFIX}*`);
         return {
-            size: weatherCache.size,
-            entries: Array.from(weatherCache.keys()),
-            cacheHitRate: this._calculateCacheHitRate()
+            size: keys.length,
+            entries: keys.map((k) => k.slice(CACHE_KEY_PREFIX.length)),
+            cacheHitRate: keys.length > 0 ? 'Active' : 'Empty'
         };
-    }
-
-    /**
-     * Calculate cache hit rate
-     * @private
-     */
-    static _calculateCacheHitRate() {
-        // Simple implementation - in production, track hits/misses
-        return weatherCache.size > 0 ? 'Active' : 'Empty';
     }
 
     /**
@@ -738,7 +781,7 @@ static _getSeasonalTemp(month) {
 }
 }
 
-// Validate API key on module load
+// Check API key on module load (warns, no longer throws — see validateApiKey)
 WeatherService.validateApiKey();
 
 module.exports = WeatherService;

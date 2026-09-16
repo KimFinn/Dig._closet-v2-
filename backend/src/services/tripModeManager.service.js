@@ -7,8 +7,7 @@
 // ============================================================================
 
 const cron = require('node-cron');
-const User = require('../model/user.model');
-const Trip = require('../model/trip.model');
+const { User, Trip } = require('../database/models');
 const logger = require('../utils/logger');
 const { Op } = require('sequelize');
 

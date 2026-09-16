@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const TripController = require('../controllers/trip.controller');
-const { authenticateUser } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const { body } = require('express-validator');
 const {
   validateCreateTrip,
@@ -39,7 +39,7 @@ const {
  */
 router.post(
     '/',
-    authenticateUser,
+    authenticate,
     validateCreateTrip,
     TripController.createTrip
 );
@@ -53,7 +53,7 @@ router.post(
  * @query   limit - Maximum number of trips to return (1-100) */
 router.get(
     '/',
-    authenticateUser,
+    authenticate,
     validateGetTrips,
     TripController.getUserTrips
 );
@@ -64,7 +64,7 @@ router.get(
  * @access Private
  */
 router.get('/active',
-    authenticateUser,
+    authenticate,
     TripController.getActiveTrip
 );
 
@@ -75,7 +75,7 @@ router.get('/active',
  */
 router.get(
     '/:tripId',
-    authenticateUser,
+    authenticate,
     validateTripId,
     TripController.getTripById
 );
@@ -87,7 +87,7 @@ router.get(
  */
 router.put(
     '/:id',
-    authenticateUser,
+    authenticate,
     validateUpdateTrip,
     TripController.updateTrip
 );
@@ -100,7 +100,7 @@ router.put(
  */
 router.delete(
     '/:id',
-    authenticateUser,
+    authenticate,
     validateTripId,
     TripController.deleteTrip
 );
@@ -116,7 +116,7 @@ router.delete(
  */
 router.post(
     '/:tripId/packaging/regenerate',
-    authenticateUser,
+    authenticate,
     validateRegeneratePackingList,
     TripController.regeneratePackingList
 );
@@ -130,7 +130,7 @@ router.post(
 //  */
 // router.patch(
 //     '/:id/complete',
-//     authenticateUser,
+//     authenticate,
 //     TripController.completeTrip
 // );
 
@@ -141,7 +141,7 @@ router.post(
 //  */
 // router.get(
 //     '/stats',
-//     authenticateUser,
+//     authenticate,
 //     TripController.getTripStats
 // );
 
@@ -152,7 +152,7 @@ router.post(
 //  */
 // router.get(
 //     '/upcoming',
-//     authenticateUser,
+//     authenticate,
 //     TripController.getUpcomingTrips
 // );
 

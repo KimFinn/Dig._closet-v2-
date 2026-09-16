@@ -18,7 +18,7 @@
 
 const { Clothes, Outfit, UserPreferences, sequelize } = require("../database/models");
 const styleRules = require("../utils/styleRules");
-const { getWeather } = require("../services/weather.service");
+const WeatherService = require("../services/weather.service");
 const logger = require('../utils/logger');
 const { Op } = require('sequelize');
 const redis = require('redis');
@@ -35,7 +35,13 @@ async function getCacheClient() {
             socket: {
                 host: process.env.REDIS_CLOUD_HOST || 'localhost',
                 port: parseInt(process.env.REDIS_CLOUD_PORT || 6379),
-                tls: process.env.REDIS_CLOUD_HOST ? true : false,
+                // TLS is an explicit opt-in (REDIS_TLS=true), not inferred from
+                // REDIS_CLOUD_HOST merely being set (that's set in every real
+                // environment, including plain local dev Redis) — the old
+                // inference forced a TLS handshake against a non-TLS local
+                // Redis, which just hangs/retries forever rather than
+                // failing, stalling every request that touches the cache.
+                tls: process.env.REDIS_TLS === 'true',
                 rejectUnauthorized: false
             },
             password: process.env.REDIS_CLOUD_PASSWORD
@@ -186,7 +192,7 @@ class OutfitEngine {
 
                 if (!weather) {
                     try {
-                        weather = await getWeather(city, country);
+                        weather = await WeatherService.getCurrentWeather(city, country);
 
                         if (weather) {
                             await setCachedData(weatherCacheKey, weather, CACHE_TTL.WEATHER_DATA);

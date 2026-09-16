@@ -2,6 +2,15 @@ const {Sequelize,DataTypes} = require('sequelize');
 require('dotenv').config();
 
 // Initialize sequalize instance
+//
+// Switched from MySQL to PostgreSQL. The `define.charset`/`collate` block
+// was MySQL-only config (utf8mb4 collation) and is invalid/ignored under
+// the postgres dialect — Postgres databases are UTF8 by default, so it's
+// simply dropped rather than translated. `pg`/`pg-hstore` replace
+// `mysql2` as the driver (see package.json). Schema is now owned by the
+// migrations in src/database/migrations/ (run via `npm run db:migrate`,
+// or `npm run seed` to migrate + seed in one step) rather than by
+// `sequelize.sync()` at boot — see server.js.
 const sequelize = new Sequelize (
     process.env.DB_NAME,
     process.env.DB_USER,
@@ -9,7 +18,7 @@ const sequelize = new Sequelize (
     {
         host: process.env.DB_HOST,
         port: process.env.DB_PORT,
-        dialect: 'mysql',
+        dialect: 'postgres',
         logging: process.env.NODE_ENV ==='development' ? console.log : false,
         pool: {
             max: 10,
@@ -18,8 +27,6 @@ const sequelize = new Sequelize (
             idle: 10000
         },
         define: {
-            charset : 'utf8mb4',
-            collate : 'utf8mb4_general_ci',
             timestamps: true,
             underscored: true,
         }
@@ -43,13 +50,33 @@ const User = sequelize.define('User', {
     },
     password: {
         type: DataTypes.STRING(255),
-        allowNull: false,
+        // OAuth-only users (Google/Apple sign-in, see googleId/appleId
+        // below) never set a password, so this can no longer be
+        // required. Password-based login/register/change-password all
+        // still require it at the request-validation layer (Joi); this
+        // is just the storage constraint being relaxed to allow the
+        // OAuth case.
+        allowNull: true,
         field: 'password_hash'
     },
     fullName: {
         type: DataTypes.STRING(255),
         allowNull: false,
         field: 'full_name'
+    },
+    googleId: {
+        type: DataTypes.STRING(255),
+        allowNull: true,
+        unique: true,
+        field: 'google_id',
+        comment: 'Google account `sub` claim, set on first Google sign-in'
+    },
+    appleId: {
+        type: DataTypes.STRING(255),
+        allowNull: true,
+        unique: true,
+        field: 'apple_id',
+        comment: 'Apple account `sub` claim, set on first Apple sign-in'
     },
     isActive: {
         type: DataTypes.BOOLEAN,
@@ -87,7 +114,7 @@ const User = sequelize.define('User', {
     },
     
     packedItems: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         allowNull: true,
         defaultValue: null,
         field: 'packed_items',
@@ -117,6 +144,10 @@ const User = sequelize.define('User', {
         { fields: ['created_at'] },
         { fields: ['active_trip_id'] }, // New index for trip queries
         { fields: ['trip_start_date', 'trip_end_date'] } // For cron job queries
+        // googleId/appleId already get a unique index from `unique: true`
+        // on their column definitions above (Postgres unique constraints
+        // treat multiple NULLs as distinct, so this doesn't block more
+        // than one password-only user from having no googleId/appleId).
     ]
 });
 
@@ -306,7 +337,7 @@ const Clothes = sequelize.define('Clothes', {
         comment: 'Cloudinary public ID for image management and deletion'
     },
     tags: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         defaultValue: [],
         validate: {
             isValidArray(value) {
@@ -369,7 +400,15 @@ const Clothes = sequelize.define('Clothes', {
     // ========================================================================
     
     aiMetadata: {
-        type: DataTypes.JSONB, // JSONB for PostgreSQL, JSON for MySQL
+        // This was DataTypes.JSONB, a Postgres-only type, back when the
+        // project's dialect was MySQL — it crashed table creation there
+        // ("Unknown data type: 'JSONB'") and was temporarily downgraded
+        // to DataTypes.JSON as a Phase 0 fix. Now that the project has
+        // switched to Postgres (see sequelize config above), JSONB is
+        // back and is in fact the right choice here: binary-stored,
+        // supports containment/indexing (e.g. a GIN index on
+        // `ai_metadata->>'provider'`), unlike plain JSON's text storage.
+        type: DataTypes.JSONB,
         field: 'ai_metadata',
         defaultValue: null,
         comment: 'AI tagging metadata including provider, confidence, cache status'
@@ -763,7 +802,7 @@ const Outfit = sequelize.define('Outfit', {
         comment: 'Occasion type for this outfit'
     },
     items: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         allowNull: false,
         defaultValue: [],
         validate: {
@@ -839,12 +878,12 @@ const Outfit = sequelize.define('Outfit', {
         comment: 'Outfit image URL'
     },
     tags: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         defaultValue: [],
         comment: 'Tags for categorization'
     },
     colorPalette: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'color_palette',
         defaultValue: [],
         comment: 'Dominant colors'
@@ -1011,17 +1050,17 @@ const Trip = sequelize.define('Trip', {
         comment: 'Weather summary'
     },
     weatherData: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'weather_data',
         comment: 'Detailed weather'
     },
     packingList: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'packing_list',
         comment: 'AI packing list'
     },
     recommendedOutfits: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'recommended_outfits',
         defaultValue: [],
         comment: 'Recommended outfits'
@@ -1038,7 +1077,7 @@ const Trip = sequelize.define('Trip', {
         comment: 'Soft delete flag'
     },
     checklist: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         defaultValue: [],
         comment: 'Trip checklist'
     },
@@ -1136,32 +1175,32 @@ const UserPreferences = sequelize.define('UserPreferences', {
         }
     },
     preferredColors: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'preferred_colors',
         defaultValue: []
     },
     avoidColors: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'avoid_colors',
         defaultValue: []
     },
     preferredFabrics: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'preferred_fabrics',
         defaultValue: []
     },
     avoidFabrics: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'avoid_fabrics',
         defaultValue: []
     },
     preferredBrands: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'preferred_brands',
         defaultValue: []
     },
     occasionFrequency: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'occasion_frequency',
         defaultValue: {}
     },
@@ -1177,7 +1216,7 @@ const UserPreferences = sequelize.define('UserPreferences', {
         }
     },
     workSchedule: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'work_schedule',
         defaultValue: {}
     },
@@ -1191,7 +1230,7 @@ const UserPreferences = sequelize.define('UserPreferences', {
         }
     },
     workdays: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         defaultValue: []
     },
     // Body & Fit
@@ -1210,7 +1249,7 @@ const UserPreferences = sequelize.define('UserPreferences', {
         defaultValue: 'regular'
     },
     sizes: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         defaultValue: {}
     },
     // Lifestyle
@@ -1218,7 +1257,7 @@ const UserPreferences = sequelize.define('UserPreferences', {
         type: DataTypes.STRING(50)
     },
     activities: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         defaultValue: []
     },
     lifestyle: {
@@ -1243,7 +1282,7 @@ const UserPreferences = sequelize.define('UserPreferences', {
         type: DataTypes.STRING(50)
     },
     notificationPreferences: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'notification_preferences',
         defaultValue: {
             outfitSuggestions: true,
@@ -1326,7 +1365,7 @@ const UserInteraction = sequelize.define('UserInteraction', {
         comment: 'How long user viewed the item/outfit'
     },
     context: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         comment: 'Context when interaction happened (weather, occasion, etc.)'
     }
 }, {
@@ -1434,12 +1473,12 @@ const ClothesAttributes = sequelize.define('ClothesAttributes', {
         comment: 'Brand detected from image'
     },
     clipEmbedding: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'clip_embedding',
         comment: 'CLIP embedding vector for visual similarity'
     },
     styleEmbedding: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'style_embedding',
         comment: 'Style embedding vector'
     }
@@ -1466,16 +1505,16 @@ const RecommendationLog = sequelize.define('RecommendationLog', {
         comment: 'Occasion for recommendation'
     },
     recommendedOutfits: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'recommended_outfits',
         comment: 'Array of recommended outfit IDs and scores'
     },
     context: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         comment: 'Context snapshot (weather, time, location)'
     },
     userPreferencesSnapshot: {
-        type: DataTypes.JSON,
+        type: DataTypes.JSONB,
         field: 'user_preferences_snapshot',
         comment: 'User preferences at time of recommendation'
     },

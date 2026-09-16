@@ -1,2 +1,9 @@
 .env
-./node_modules
+node_modules/
+
+# Runtime artifacts created at boot (server.js) / by uploads and logging —
+# never meant to be committed. .env.example is deliberately NOT listed
+# here: it's the secret-free template and should be tracked.
+logs/
+uploads/
+*.log

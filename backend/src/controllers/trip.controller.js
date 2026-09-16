@@ -13,7 +13,7 @@ class TripController {
         if (!errors.isEmpty()) {
           return res.status(400).json({ success: false,message:"Validation failed", errors: errors.array() });
         }
-      const userId = req.user.id;
+      const userId = req.user.userId;
 
       //Call trip service
       const result = await tripService.createTrip(userId, req.body);
@@ -33,7 +33,7 @@ class TripController {
      logger.error("Error creating trip", {
         error: error.message,
         stack: error.stack,
-        userId: req.user?.id,
+        userId: req.user?.userId,
      });
      next(error);
     }
@@ -45,7 +45,7 @@ class TripController {
      */
       static async getUserTrips(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = req.user.userId;
            
             const filters = {
                 status: req.query.status,
@@ -67,7 +67,7 @@ class TripController {
         } catch (error) {
         logger.error('Error fetching user trip:', {
             error: error.message,
-            userId : req.user?.id
+            userId : req.user?.userId
         });
         next();
         }
@@ -80,7 +80,7 @@ class TripController {
   static async getTripById(req, res) {
     try {
         const {tripId} = req.params;
-        const userId = req.user.id;
+        const userId = req.user.userId;
 
         if(!tripId) {
             return res.status(400).json({
@@ -106,7 +106,7 @@ class TripController {
         logger.error("Error fetching trip:", {
             error: error.message,
             tripId:req.params.id,
-            userId: req.user?.id
+            userId: req.user?.userId
         })
         next(error);
     }
@@ -128,7 +128,7 @@ class TripController {
         });
       }
         const {tripId} = req.params;
-        const userId = req.user.id;
+        const userId = req.user.userId;
 
         if(!tripId) {
             return res.status(400).json({
@@ -155,7 +155,7 @@ class TripController {
         logger.error('Error updating trip:',{
             error:error.message,
             tripId:req.params?.id,
-            userId: req.user?.id
+            userId: req.user?.userId
         });
         next(error);
     }
@@ -168,7 +168,7 @@ class TripController {
   static async deleteTrip(req, res,next) {
     try {
         const { tripId } = req.params;
-        const userId = req.user.id;
+        const userId = req.user.userId;
 
 
         if (!tripId) {
@@ -196,7 +196,7 @@ class TripController {
         logger.error('Error deleting trip:', {
                 error: error.message,
                 tripId: req.params.id,
-                userId: req.user?.id
+                userId: req.user?.userId
             });
             next(error);
         }
@@ -208,7 +208,7 @@ class TripController {
    */
   static async getActiveTrip(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
 
       const trip = await tripService.getActiveTrip(userId);
 
@@ -228,7 +228,7 @@ class TripController {
     } catch (error) {
       logger.error('Get active trip error', {
         error: error.message,
-        userId: req.user?.id
+        userId: req.user?.userId
       });
       next(error);
     }
@@ -239,7 +239,7 @@ class TripController {
    */
   static async regeneratePackingList(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
       const { tripId } = req.params;
 
       // Get trip
@@ -274,7 +274,7 @@ class TripController {
     } catch (error) {
       logger.error('Regenerate packing list error', {
         error: error.message,
-        userId: req.user?.id,
+        userId: req.user?.userId,
         tripId: req.params?.tripId
       });
       next(error);
@@ -289,7 +289,7 @@ class TripController {
     //  */
     // static async getTripStats(req, res, next) {
     //     try {
-    //         const userId = req.user.id;
+    //         const userId = req.user.userId;
     //         const now = new Date();
 
     //         const [
@@ -350,7 +350,7 @@ class TripController {
     //     } catch (error) {
     //         logger.error('Error getting trip stats:', {
     //             error: error.message,
-    //             userId: req.user?.id
+    //             userId: req.user?.userId
     //         });
     //         next(error);
     //     }
@@ -362,7 +362,7 @@ class TripController {
     //  */
     // static async getUpcomingTrips(req, res, next) {
     //     try {
-    //         const userId = req.user.id;
+    //         const userId = req.user.userId;
     //         const now = new Date();
     //         const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
@@ -385,7 +385,7 @@ class TripController {
     //     } catch (error) {
     //         logger.error('Error getting upcoming trips:', {
     //             error: error.message,
-    //             userId: req.user?.id
+    //             userId: req.user?.userId
     //         });
     //         next(error);
     //     }
@@ -398,7 +398,7 @@ class TripController {
     // static async completeTrip(req, res, next) {
     //     try {
     //         const { id } = req.params;
-    //         const userId = req.user.id;
+    //         const userId = req.user.userId;
 
     //         const trip = await Trip.findOne({
     //             where: { id, userId }
@@ -428,7 +428,7 @@ class TripController {
     //         logger.error('Error completing trip:', {
     //             error: error.message,
     //             tripId: req.params.id,
-    //             userId: req.user?.id
+    //             userId: req.user?.userId
     //         });
     //         next(error);
     //     }

@@ -57,7 +57,12 @@ class MCPConfig {
     this.redisHost = options.redisHost || process.env.REDIS_CLOUD_HOST || 'localhost';
     this.redisPort = options.redisPort || process.env.REDIS_CLOUD_PORT || 6379;
     this.redisPassword = options.redisPassword || process.env.REDIS_CLOUD_PASSWORD;
-    this.redisUseSSL = options.redisUseSSL !== undefined ? options.redisUseSSL : true;
+    // Was `... : true` — defaulted to requiring TLS even when nothing
+    // passed an explicit choice, which breaks a plain local dev Redis
+    // (see REDIS_TLS note in the two callers of this config). Both real
+    // callers now pass this explicitly either way, but the fallback
+    // itself should not assume a managed/cloud Redis.
+    this.redisUseSSL = options.redisUseSSL !== undefined ? options.redisUseSSL : (process.env.REDIS_TLS === 'true');
     
     // Cache settings
     this.useCache = options.useCache !== undefined ? options.useCache : true;

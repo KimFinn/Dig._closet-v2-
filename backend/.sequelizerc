@@ -1,0 +1,18 @@
+// sequelize-cli configuration.
+//
+// This project keeps its Sequelize model definitions in a single file
+// (src/database/models/index.js, using sequelize.define() rather than
+// sequelize-cli's one-file-per-model convention) — that's unchanged.
+// sequelize-cli is only used here for its migration runner
+// (`npm run db:migrate`) and seed runner (`npm run db:seed`), so these
+// paths just point it at the config file and where the hand-written
+// migration/seeder files live, additively, without touching how models
+// are defined or imported anywhere else in the codebase.
+const path = require('path');
+
+module.exports = {
+  config: path.resolve('src', 'database', 'config', 'config.js'),
+  'migrations-path': path.resolve('src', 'database', 'migrations'),
+  'seeders-path': path.resolve('src', 'database', 'seeders'),
+  'models-path': path.resolve('src', 'database', 'models'),
+};
