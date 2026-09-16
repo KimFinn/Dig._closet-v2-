@@ -102,9 +102,14 @@ class TripModeManager {
           isActive: true,
           packingList: { [Op.ne]: null }
         },
+        // Fix: Trip.belongsTo(User, ...) has no explicit `as`, so the
+        // real Sequelize alias defaults to the model name 'User', not
+        // 'user' (same bug found and fixed in tripService.getTripById).
+        // All three includes in this file below were using the wrong
+        // alias and would throw on every call.
         include: [{
           model: User,
-          as: 'user',
+          as: 'User',
           where: {
             activeTripId: null // User not already on a trip
           }
@@ -278,7 +283,7 @@ class TripModeManager {
   async manualActivateTrip(tripId) {
     try {
       const trip = await Trip.findByPk(tripId, {
-        include: [{ model: User, as: 'user' }]
+        include: [{ model: User, as: 'User' }]
       });
 
       if (!trip) {
@@ -332,7 +337,7 @@ class TripModeManager {
   async manualDeactivateTrip(tripId) {
     try {
       const trip = await Trip.findByPk(tripId, {
-        include: [{ model: User, as: 'user' }]
+        include: [{ model: User, as: 'User' }]
       });
 
       if (!trip) {

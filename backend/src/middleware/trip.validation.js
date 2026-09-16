@@ -1,223 +1,111 @@
 // ============================================================================
 // TRIP VALIDATION MIDDLEWARE
 // ============================================================================
-// Express-validator rules for trip endpoints
+// Phase 0 fix (completed): this used to run on express-validator while
+// auth/clothes/outfit run on Joi. Ported to Joi here for real, using the
+// same `validate(schema, source)` helper auth already uses — one library,
+// one pattern, everywhere.
+//
+// While porting this, found and fixed a real bug: `validateUpdateTrip`
+// validated `param('tripId')`, but the route it's attached to
+// (PUT /api/v1/trip/:id) actually names its param `:id` — so this check
+// was validating a field that never existed and PUT always failed
+// validation with a 400, before the handler ever ran. `DELETE /:id` had
+// the same mismatch via `validateTripId`, just silently (its controller
+// never checked express-validator's result at all, so the bad validator
+// there was inert rather than blocking — see trip.routes.js's comment).
+// Fixed by standardizing every trip route on `:tripId` as the param name
+// (trip.routes.js renames `/:id` -> `/:tripId` for PUT/DELETE to match);
+// trip.controller.js already reads `req.params.tripId` in both places, so
+// no controller change was needed once the route path matches it.
 // ============================================================================
 
-const { body, param, query } = require('express-validator');
+const Joi = require('joi');
+const { validate } = require('./validators');
 
-/**
- * ✅ VALIDATION: Create Trip
- */
-const validateCreateTrip = [
-  body('destination')
-    .trim()
-    .notEmpty()
-    .withMessage('Destination is required')
-    .isLength({ min: 2, max: 255 })
-    .withMessage('Destination must be between 2-255 characters'),
+const tripIdParamSchema = Joi.object({
+    tripId: Joi.string().uuid().required().label('Trip ID'),
+});
 
-  body('startDate')
-    .notEmpty()
-    .withMessage('Start date is required')
-    .isISO8601()
-    .withMessage('Invalid start date format (use ISO 8601: YYYY-MM-DD)'),
+const activitySlotSchema = Joi.object({
+    time: Joi.string().valid('morning', 'afternoon', 'evening', 'night', 'all-day'),
+    occasion: Joi.string().trim().min(1),
+});
 
-  body('endDate')
-    .notEmpty()
-    .withMessage('End date is required')
-    .isISO8601()
-    .withMessage('Invalid end date format (use ISO 8601: YYYY-MM-DD)'),
+const activitySchema = Joi.object({
+    date: Joi.string().isoDate(),
+    slots: Joi.array().items(activitySlotSchema),
+}).unknown(true);
 
-  body('purpose')
-    .optional()
-    .trim()
-    .isIn(['leisure', 'business', 'adventure', 'family', 'romantic', 'solo'])
-    .withMessage('Invalid trip purpose'),
+const luggageConstraintsSchema = Joi.object({
+    type: Joi.string().valid('carry-on', 'checked-luggage', 'backpack', 'unlimited'),
+    maxItems: Joi.number().integer().min(1).max(100),
+}).unknown(true);
 
-  body('tripType')
-    .optional()
-    .trim()
-    .isIn(['weekend', 'vacation', 'business', 'backpacking', 'road-trip', 'cruise'])
-    .withMessage('Invalid trip type'),
+const createTripBodySchema = Joi.object({
+    destination: Joi.string().trim().min(2).max(255).required()
+        .messages({
+            'string.min': 'Destination must be between 2-255 characters',
+            'string.max': 'Destination must be between 2-255 characters',
+            'any.required': 'Destination is required',
+        }),
+    startDate: Joi.string().isoDate().required()
+        .messages({
+            'string.isoDate': 'Invalid start date format (use ISO 8601: YYYY-MM-DD)',
+            'any.required': 'Start date is required',
+        }),
+    endDate: Joi.string().isoDate().required()
+        .messages({
+            'string.isoDate': 'Invalid end date format (use ISO 8601: YYYY-MM-DD)',
+            'any.required': 'End date is required',
+        }),
+    purpose: Joi.string().trim().valid('leisure', 'business', 'adventure', 'family', 'romantic', 'solo')
+        .messages({ 'any.only': 'Invalid trip purpose' }),
+    tripType: Joi.string().trim().valid('weekend', 'vacation', 'business', 'backpacking', 'road-trip', 'cruise')
+        .messages({ 'any.only': 'Invalid trip type' }),
+    budget: Joi.number().min(0).messages({ 'number.min': 'Budget must be a positive number' }),
+    accommodation: Joi.string().trim().max(255)
+        .messages({ 'string.max': 'Accommodation description too long (max 255 characters)' }),
+    transportation: Joi.string().trim().max(255)
+        .messages({ 'string.max': 'Transportation description too long (max 255 characters)' }),
+    companions: Joi.number().integer().min(1).max(50)
+        .messages({ 'number.min': 'Companions must be between 1-50', 'number.max': 'Companions must be between 1-50' }),
+    notes: Joi.string().trim().max(2000)
+        .messages({ 'string.max': 'Notes too long (max 2000 characters)' }),
+    activities: Joi.array().items(activitySchema),
+    luggageConstraints: luggageConstraintsSchema,
+});
 
-  body('budget')
-    .optional()
-    .isFloat({ min: 0 })
-    .withMessage('Budget must be a positive number'),
+const updateTripBodySchema = Joi.object({
+    destination: Joi.string().trim().min(2).max(255)
+        .messages({ 'string.min': 'Destination must be between 2-255 characters', 'string.max': 'Destination must be between 2-255 characters' }),
+    startDate: Joi.string().isoDate().messages({ 'string.isoDate': 'Invalid start date format' }),
+    endDate: Joi.string().isoDate().messages({ 'string.isoDate': 'Invalid end date format' }),
+    purpose: Joi.string().trim().valid('leisure', 'business', 'adventure', 'family', 'romantic', 'solo')
+        .messages({ 'any.only': 'Invalid trip purpose' }),
+    tripType: Joi.string().trim().valid('weekend', 'vacation', 'business', 'backpacking', 'road-trip', 'cruise')
+        .messages({ 'any.only': 'Invalid trip type' }),
+    budget: Joi.number().min(0).messages({ 'number.min': 'Budget must be a positive number' }),
+    status: Joi.string().valid('upcoming', 'active', 'completed', 'cancelled')
+        .messages({ 'any.only': 'Invalid trip status' }),
+    notes: Joi.string().trim().max(2000).messages({ 'string.max': 'Notes too long (max 2000 characters)' }),
+});
 
-  body('accommodation')
-    .optional()
-    .trim()
-    .isLength({ max: 255 })
-    .withMessage('Accommodation description too long (max 255 characters)'),
+const getTripsQuerySchema = Joi.object({
+    status: Joi.string().valid('upcoming', 'active', 'completed', 'cancelled'),
+    isActive: Joi.boolean(),
+    limit: Joi.number().integer().min(1).max(100),
+});
 
-  body('transportation')
-    .optional()
-    .trim()
-    .isLength({ max: 255 })
-    .withMessage('Transportation description too long (max 255 characters)'),
-
-  body('companions')
-    .optional()
-    .isInt({ min: 1, max: 50 })
-    .withMessage('Companions must be between 1-50'),
-
-  body('notes')
-    .optional()
-    .trim()
-    .isLength({ max: 2000 })
-    .withMessage('Notes too long (max 2000 characters)'),
-
-  // ✅ ACTIVITIES VALIDATION
-  body('activities')
-    .optional()
-    .isArray()
-    .withMessage('Activities must be an array'),
-
-  body('activities.*.date')
-    .optional()
-    .isISO8601()
-    .withMessage('Activity date must be valid ISO 8601 format'),
-
-  body('activities.*.slots')
-    .optional()
-    .isArray()
-    .withMessage('Activity slots must be an array'),
-
-  body('activities.*.slots.*.time')
-    .optional()
-    .isIn(['morning', 'afternoon', 'evening', 'night', 'all-day'])
-    .withMessage('Invalid time slot'),
-
-  body('activities.*.slots.*.occasion')
-    .optional()
-    .trim()
-    .notEmpty()
-    .withMessage('Occasion cannot be empty'),
-
-  // ✅ LUGGAGE CONSTRAINTS VALIDATION
-  body('luggageConstraints')
-    .optional()
-    .isObject()
-    .withMessage('Luggage constraints must be an object'),
-
-  body('luggageConstraints.type')
-    .optional()
-    .isIn(['carry-on', 'checked-luggage', 'backpack', 'unlimited'])
-    .withMessage('Invalid luggage type'),
-
-  body('luggageConstraints.maxItems')
-    .optional()
-    .isInt({ min: 1, max: 100 })
-    .withMessage('Max items must be between 1-100')
-];
-
-/**
- * ✅ VALIDATION: Update Trip
- */
-const validateUpdateTrip = [
-  param('tripId')
-    .isUUID()
-    .withMessage('Invalid trip ID'),
-
-  body('destination')
-    .optional()
-    .trim()
-    .isLength({ min: 2, max: 255 })
-    .withMessage('Destination must be between 2-255 characters'),
-
-  body('startDate')
-    .optional()
-    .isISO8601()
-    .withMessage('Invalid start date format'),
-
-  body('endDate')
-    .optional()
-    .isISO8601()
-    .withMessage('Invalid end date format'),
-
-  body('purpose')
-    .optional()
-    .trim()
-    .isIn(['leisure', 'business', 'adventure', 'family', 'romantic', 'solo'])
-    .withMessage('Invalid trip purpose'),
-
-  body('tripType')
-    .optional()
-    .trim()
-    .isIn(['weekend', 'vacation', 'business', 'backpacking', 'road-trip', 'cruise'])
-    .withMessage('Invalid trip type'),
-
-  body('budget')
-    .optional()
-    .isFloat({ min: 0 })
-    .withMessage('Budget must be a positive number'),
-
-  body('status')
-    .optional()
-    .isIn(['upcoming', 'active', 'completed', 'cancelled'])
-    .withMessage('Invalid trip status'),
-
-  body('notes')
-    .optional()
-    .trim()
-    .isLength({ max: 2000 })
-    .withMessage('Notes too long (max 2000 characters)')
-];
-
-/**
- * ✅ VALIDATION: Trip ID Parameter
- */
-const validateTripId = [
-  param('tripId')
-    .isUUID()
-    .withMessage('Invalid trip ID format')
-];
-
-/**
- * ✅ VALIDATION: Get Trips Query Filters
- */
-const validateGetTrips = [
-  query('status')
-    .optional()
-    .isIn(['upcoming', 'active', 'completed', 'cancelled'])
-    .withMessage('Invalid status filter'),
-
-  query('isActive')
-    .optional()
-    .isBoolean()
-    .withMessage('isActive must be boolean'),
-
-  query('limit')
-    .optional()
-    .isInt({ min: 1, max: 100 })
-    .withMessage('Limit must be between 1-100')
-];
-
-/**
- * ✅ VALIDATION: Regenerate Packing List
- */
-const validateRegeneratePackingList = [
-  param('tripId')
-    .isUUID()
-    .withMessage('Invalid trip ID'),
-
-  body('activities')
-    .optional()
-    .isArray()
-    .withMessage('Activities must be an array'),
-
-  body('luggageConstraints')
-    .optional()
-    .isObject()
-    .withMessage('Luggage constraints must be an object')
-];
+const regeneratePackingListBodySchema = Joi.object({
+    activities: Joi.array().items(activitySchema),
+    luggageConstraints: luggageConstraintsSchema,
+});
 
 module.exports = {
-  validateCreateTrip,
-  validateUpdateTrip,
-  validateTripId,
-  validateGetTrips,
-  validateRegeneratePackingList
+    validateCreateTrip: validate(createTripBodySchema, 'body'),
+    validateUpdateTrip: [validate(tripIdParamSchema, 'params'), validate(updateTripBodySchema, 'body')],
+    validateTripId: validate(tripIdParamSchema, 'params'),
+    validateGetTrips: validate(getTripsQuerySchema, 'query'),
+    validateRegeneratePackingList: [validate(tripIdParamSchema, 'params'), validate(regeneratePackingListBodySchema, 'body')],
 };

@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const TripController = require('../controllers/trip.controller');
 const { authenticate } = require('../middleware/auth');
-const { body } = require('express-validator');
 const {
   validateCreateTrip,
   validateUpdateTrip,
@@ -81,25 +80,36 @@ router.get(
 );
 
 /**
- * @route   PUT /api/trips/:id
+ * @route   PUT /api/trips/:tripId
  * @desc    Update trip details
  * @access  Private
+ *
+ * Phase 0 fix: this was registered as `/:id`, but both `validateUpdateTrip`
+ * and TripController.updateTrip read `req.params.tripId` — so this route
+ * always 400'd on a param-name mismatch before the handler ever ran
+ * (confirmed: `req.params.tripId` was always undefined here). Renamed to
+ * `/:tripId` to match what the validator/controller actually read, rather
+ * than changing them to match a wrong path.
  */
 router.put(
-    '/:id',
+    '/:tripId',
     authenticate,
     validateUpdateTrip,
     TripController.updateTrip
 );
 
 /**
- * @route   DELETE /api/trips/:id
+ * @route   DELETE /api/trips/:tripId
  * @desc    Delete trip (soft or permanent)
  * @access  Private
  * @query   permanent=true for permanent deletion
+ *
+ * Phase 0 fix: same `/:id` vs `/:tripId` mismatch as PUT above —
+ * TripController.deleteTrip reads `req.params.tripId`, which this route
+ * never provided under the old `/:id` path.
  */
 router.delete(
-    '/:id',
+    '/:tripId',
     authenticate,
     validateTripId,
     TripController.deleteTrip

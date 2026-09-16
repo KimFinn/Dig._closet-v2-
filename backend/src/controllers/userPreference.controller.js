@@ -1,6 +1,8 @@
 const { UserPreferences } = require("../database/models");
 const logger = require('../utils/logger');
-const { validationResult } = require('express-validator');
+// Phase 0 fix: validation now happens entirely in the Joi middleware
+// (userPreference.validation.js, applied in userPreference.routes.js) —
+// the express-validator check that used to live here is gone.
 
 class UserPreferencesController {
     /**
@@ -9,16 +11,6 @@ class UserPreferencesController {
      */
     static async createOrUpdatePreferences(req, res, next) {
         try {
-            // Validate request
-            const errors = validationResult(req);
-            if (!errors.isEmpty()) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'Validation failed',
-                    errors: errors.array()
-                });
-            }
-
             const userId = req.user.userId;
             const {
                 // Style preferences

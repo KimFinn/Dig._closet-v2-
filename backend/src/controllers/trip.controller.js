@@ -1,6 +1,12 @@
 const {tripService} = require('../services/tripService');
 const logger = require('../utils/logger');
-const { validationResult } = require('express-validator');
+// Phase 0 fix: validation is now handled entirely by the Joi middleware
+// in trip.validation.js (applied in trip.routes.js) — request bodies/
+// params never reach these handlers unless they already passed. The
+// express-validator `validationResult(req)` checks that used to live
+// here are gone; createTrip's had a bug where it belonged, and getUserTrips
+// et al. never called validationResult in the first place (their attached
+// validators were silently inert).
 
 class TripController {
 /**
@@ -9,10 +15,6 @@ class TripController {
      */
       static async createTrip(req, res,next) {
     try {
-        const errors = validationResult(req);
-        if (!errors.isEmpty()) {
-          return res.status(400).json({ success: false,message:"Validation failed", errors: errors.array() });
-        }
       const userId = req.user.userId;
 
       //Call trip service
@@ -77,7 +79,15 @@ class TripController {
      * Get a single trip by ID
      * @route GET /api/trips/:id
      */
-  static async getTripById(req, res) {
+  static async getTripById(req, res, next) {
+    // Fix: this method was missing the `next` parameter while its catch
+    // block below called next(error) — a ReferenceError thrown from
+    // inside a catch block is NOT caught by the surrounding try/catch,
+    // so it became an uncaught exception that crashed the entire Node
+    // process (server.js's uncaughtException handler calls
+    // process.exit(1)). Combined with the Trip/User alias bug in
+    // tripService.js, every call to this endpoint took the whole API
+    // down.
     try {
         const {tripId} = req.params;
         const userId = req.user.userId;
@@ -105,7 +115,7 @@ class TripController {
 
         logger.error("Error fetching trip:", {
             error: error.message,
-            tripId:req.params.id,
+            tripId:req.params.tripId,
             userId: req.user?.userId
         })
         next(error);
@@ -119,14 +129,6 @@ class TripController {
 
   static async updateTrip(req, res,next) {
     try {
-        const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({ 
-          success: false,
-          message: "Validation failed", 
-          errors: errors.array() 
-        });
-      }
         const {tripId} = req.params;
         const userId = req.user.userId;
 

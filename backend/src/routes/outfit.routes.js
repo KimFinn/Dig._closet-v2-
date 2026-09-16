@@ -2,50 +2,19 @@ const express = require('express');
 const router = express.Router();
 const OutfitController = require('../controllers/outfit.controller');
 const { authenticate } = require('../middleware/auth');
-const { body } = require('express-validator');
 
-// Validation middleware
-const createOutfitValidation = [
-    body('name')
-        .notEmpty()
-        .withMessage('Outfit name is required')
-        .trim()
-        .isLength({ min: 1, max: 255 })
-        .withMessage('Outfit name must be between 1 and 255 characters'),
-    body('items')
-        .isArray({ min: 1 })
-        .withMessage('At least one clothing item is required'),
-    body('items.*')
-        .isUUID()
-        .withMessage('Invalid clothing item ID'),
-    body('occasion')
-        .optional()
-        .trim()
-        .isIn(['casual', 'formal', 'business', 'athletic', 'party', 'date', 'outdoor', 'beach', 'wedding', 'travel'])
-        .withMessage('Invalid occasion type'),
-    body('notes')
-        .optional()
-        .trim()
-        .isLength({ max: 1000 })
-        .withMessage('Notes must be less than 1000 characters')
-];
-
-const suggestOutfitValidation = [
-    body('occasion')
-        .notEmpty()
-        .withMessage('Occasion is required')
-        .trim(),
-    body('city')
-        .optional()
-        .trim()
-        .isLength({ max: 100 })
-        .withMessage('City name too long'),
-    body('country')
-        .optional()
-        .trim()
-        .isLength({ max: 100 })
-        .withMessage('Country name too long')
-];
+// Phase 0 fix: this file used to also import `body` from express-validator
+// and attach validation chains (createOutfitValidation, suggestOutfitValidation,
+// and inline arrays on a few routes below) to several routes. None of them
+// ever did anything: outfit.controller.js never calls express-validator's
+// validationResult() anywhere, so those chains just silently attached
+// unread error state to `req` and every request passed through regardless
+// of whether it matched the rules. Real validation for every one of these
+// routes already happens via Joi directly inside the controller
+// (validationSchemas.* — see outfit.controller.js), matching the pattern
+// clothes.controller.js already used. Removed the dead express-validator
+// chains rather than porting them, since porting inert code would just be
+// adding a second, redundant validation pass.
 
 /**
  * @route   POST /api/outfits
@@ -55,7 +24,6 @@ const suggestOutfitValidation = [
 router.post(
     '/',
     authenticate,
-    createOutfitValidation,
     OutfitController.createOutfit
 );
 
@@ -67,7 +35,6 @@ router.post(
 router.post(
     '/suggest',
     authenticate,
-    suggestOutfitValidation,
     OutfitController.suggestOutfit
 );
 
@@ -126,18 +93,6 @@ router.get(
 router.post(
     '/recommendations/custom',
     authenticate,
-    [
-        body('date')
-            .notEmpty()
-            .withMessage('Date is required')
-            .isISO8601()
-            .withMessage('Invalid date format (use ISO 8601)'),
-        body('activity')
-            .optional()
-            .trim()
-            .isLength({ max: 100 })
-            .withMessage('Activity name too long')
-    ],
     OutfitController.getCustomOutfit
 );
 
@@ -160,27 +115,6 @@ router.get(
 router.put(
     '/:id',
     authenticate,
-    [
-        body('name')
-            .optional()
-            .trim()
-            .isLength({ min: 1, max: 255 })
-            .withMessage('Outfit name must be between 1 and 255 characters'),
-        body('items')
-            .optional()
-            .isArray({ min: 1 })
-            .withMessage('Items must be a non-empty array'),
-        body('items.*')
-            .optional()
-            .isUUID()
-            .withMessage('Invalid clothing item ID'),
-        body('occasion')
-            .optional()
-            .trim(),
-        body('notes')
-            .optional()
-            .trim()
-    ],
     OutfitController.updateOutfit
 );
 
@@ -208,27 +142,51 @@ router.patch(
 );
 
 /**
- * @route   POST /api/outfits/:id/wear
- * @desc    Record when outfit was worn
+ * @route   POST /api/outfits/:id/interaction
+ * @desc    Track a user interaction with an outfit (save/like/dislike/skip/share/...)
  * @access  Private
+ *
+ * Phase 0 fix: this was registered as `POST /interactions` — no `:id`
+ * segment at all — while trackInteraction always reads the outfit id from
+ * `req.params.id`. Every call therefore had `outfitId = undefined` and
+ * 404'd. Renamed to match what the controller (and its own JSDoc, which
+ * already documented this route correctly) actually expects.
  */
-router.post(
-    '/:id/wear',
-    authenticate,
-    [
-        body('wornAt')
-            .optional()
-            .isISO8601()
-            .withMessage('Invalid date format for wornAt')
-    ],
-    OutfitController.recordWear
-);
+router.post('/:id/interaction', authenticate, OutfitController.trackInteraction);
 
-router.post('/interactions', authenticate, OutfitController.trackInteraction);
+/**
+ * @route   POST /api/outfits/:id/rate
+ * @desc    Rate an outfit
+ * @access  Private
+ *
+ * Phase 0 fix: was registered as `/:outfitId/rate`, but rateOutfit reads
+ * `req.params.id` — so `outfitId` was always undefined and every rating
+ * request failed. Renamed the param to `:id` to match the controller and
+ * every sibling outfit sub-resource route above, rather than the other
+ * way around.
+ */
+router.post('/:id/rate', authenticate, OutfitController.rateOutfit);
 
-router.post('/:outfitId/rate', authenticate, OutfitController.rateOutfit);
-
-router.post('/:outfitId/wear', authenticate, OutfitController.wearOutfit);
-
+/**
+ * @route   POST /api/outfits/:id/wear
+ * @desc    Record when an outfit was worn (increments wearCount, logs a
+ *          UserInteraction 'wear' event)
+ * @access  Private
+ *
+ * Phase 0 fix: this path used to be claimed by TWO handlers registered
+ * back to back — `recordWear` here first, then `wearOutfit` at
+ * `/:outfitId/wear` (same URL shape, different param name — Express
+ * matches whichever is registered first, so wearOutfit was permanently
+ * unreachable dead code, the same route-shadowing bug class already found
+ * and fixed once in clothes.routes.js). Worse, `recordWear` itself called
+ * `OutfitService.recordWear(...)`, a method that doesn't exist anywhere in
+ * outfitEngine.js — every call threw and 500'd. `wearOutfit` is the real,
+ * working implementation (marks the outfit worn AND logs the
+ * UserInteraction event Phase 1's learning loop depends on) and already
+ * correctly reads `req.params.id`, so it's now the sole handler for this
+ * route. The broken `recordWear` method has been removed from the
+ * controller entirely rather than left as unreachable dead code.
+ */
+router.post('/:id/wear', authenticate, OutfitController.wearOutfit);
 
 module.exports = router;

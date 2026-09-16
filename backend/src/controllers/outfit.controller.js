@@ -21,7 +21,11 @@ const OutfitService = require("../services/outfitEngine");
 const OutfitRecommendationService = require("../services/AIOutfit recommendation");
 const { Trip, UserInteraction, Outfit, OutfitRating } = require("../database/models");
 const logger = require('../utils/logger');
-const { validationResult } = require('express-validator');
+// Phase 0 fix: express-validator's `validationResult` was imported here
+// but never actually called anywhere in this file — every write path
+// (create/update/suggest/rate/custom-recommendation) already validates
+// via the Joi `validationSchemas` below, which is the only validation
+// that was ever real in this controller.
 const Joi = require('joi');
 const sanitizeHtml = require('sanitize-html');
 const redis = require('redis');
@@ -856,59 +860,15 @@ class OutfitController {
         }
     }
 
-    /**
-     * Record when an outfit was worn
-     * @route POST /api/outfits/:id/wear
-     * 
-     * IMPROVEMENTS:
-     * - Cache invalidation
-     * - Better validation
-     */
-    static async recordWear(req, res, next) {
-        try {
-            const { id } = req.params;
-            const userId = req.user.userId;
-            const { wornAt } = req.body;
-
-            // Verify ownership
-            const outfit = await OutfitService.getOutfitById(id, userId);
-            if (!outfit) {
-                return res.status(404).json(
-                    buildErrorResponse(ERROR_CODES.OUTFIT_NOT_FOUND, 'Outfit not found or access denied')
-                );
-            }
-
-            // Record wear
-            const result = await OutfitService.recordWear(id, userId, wornAt);
-
-            // Invalidate caches
-            await invalidateCache(`outfit:${id}`);
-            await invalidateCache(`outfits:user:${userId}:*`);
-            await invalidateCache(`outfits:analytics:${userId}`);
-
-            logger.info("✅ Outfit wear recorded", {
-                outfitId: id,
-                userId: userId,
-                wearCount: result.wearCount
-            });
-
-            res.status(200).json(
-                buildSuccessResponse('Outfit wear recorded successfully', {
-                    wearCount: result.wearCount,
-                    lastWornAt: result.lastWornAt
-                })
-            );
-
-        } catch (error) {
-            logger.error("❌ Error recording outfit wear", {
-                error: error.message,
-                stack: error.stack,
-                userId: req.user?.userId,
-                outfitId: req.params?.id
-            });
-            next(error);
-        }
-    }
+    // Phase 0 fix: `recordWear` used to live here, registered at
+    // `POST /:id/wear`. It called `OutfitService.recordWear(...)`, a
+    // method that has never existed on outfitEngine.js — every call threw
+    // and 500'd. It also permanently shadowed `wearOutfit` below (the
+    // real, working implementation, previously stuck at an unreachable
+    // `/:outfitId/wear` route — see outfit.routes.js). Removed rather than
+    // fixed in place, since `wearOutfit` already does everything this was
+    // supposed to (ownership check, mark-as-worn, cache invalidation,
+    // UserInteraction logging) correctly.
 
     /**
      * Get outfit recommendation for today

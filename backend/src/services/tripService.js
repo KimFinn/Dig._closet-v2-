@@ -212,14 +212,20 @@ class TripService {
     const trip = await Trip.findOne({ 
       where: { id: tripId, userId },
       include: [
-        { 
-          model: User, 
-          as: 'user',
-          attributes: ['id', 'fullName', 'email'] 
+        {
+          // Fix: Trip.belongsTo(User, ...) is defined with no explicit
+          // `as`, so Sequelize defaults the alias to the model name
+          // 'User' (capitalized), not 'user'. The mismatched alias here
+          // threw a Sequelize error on every call, which in turn crashed
+          // the whole server via the missing `next` param in
+          // trip.controller.js#getTripById (fixed alongside this).
+          model: User,
+          as: 'User',
+          attributes: ['id', 'fullName', 'email']
         }
       ]
     });
-    
+
     if (!trip) {
       throw new Error('Trip not found');
     }
