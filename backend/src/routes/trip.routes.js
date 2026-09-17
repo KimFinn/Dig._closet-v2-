@@ -7,7 +7,8 @@ const {
   validateUpdateTrip,
   validateTripId,
   validateGetTrips,
-  validateRegeneratePackingList
+  validateRegeneratePackingList,
+  validateUpdateDayActivity
 } = require('../middleware/trip.validation');
 
 
@@ -129,6 +130,24 @@ router.post(
     authenticate,
     validateRegeneratePackingList,
     TripController.regeneratePackingList
+);
+
+/**
+ * @route   PATCH /api/trips/:tripId/activities
+ * @desc    Add/change/remove one day's activity plan and regenerate the
+ *          packing list -- without resending the full activities array
+ * @access  Private
+ * @body    {
+ *   date: string (required) - "2025-01-16"
+ *   slots: array (optional) - [{ time: "morning", occasion: "hiking" }]
+ *          -- omit or pass [] to clear that day's plan entirely
+ * }
+ */
+router.patch(
+    '/:tripId/activities',
+    authenticate,
+    validateUpdateDayActivity,
+    TripController.updateDayActivity
 );
 
 // To be implemented later

@@ -981,8 +981,14 @@ class OutfitController {
 
             if (cached) {
                 logger.info(`✅ Cache HIT for today's outfit`);
+                // Phase 4: cached value is now {suggestions, tripMode,
+                // tripGap} (was just the bare suggestions array) -- spread
+                // it directly rather than re-wrapping, or a cache hit
+                // would nest it one level too deep and silently drop
+                // tripMode/tripGap from a fresh (non-cached) response's
+                // shape.
                 return res.status(200).json({
-                    ...buildSuccessResponse("Today's outfit recommendation", { suggestions: cached }),
+                    ...buildSuccessResponse("Today's outfit recommendation", cached),
                     cached: true
                 });
             }
@@ -1012,11 +1018,18 @@ class OutfitController {
                 );
             }
 
+            // Phase 4: trip-mode gap flag -- when it's set, `suggestions`
+            // is the closest available compromise from the packed
+            // capsule, not a confident match. Cached alongside the
+            // suggestions themselves so a cache hit doesn't silently
+            // drop the flag.
+            const responseData = { suggestions, tripMode: result.tripMode || false, tripGap: result.tripGap || null };
+
             // Cache for 6 hours
-            await setCachedData(cacheKey, suggestions, 21600);
+            await setCachedData(cacheKey, responseData, 21600);
 
             return res.status(200).json(
-                buildSuccessResponse("Today's outfit recommendation", { suggestions })
+                buildSuccessResponse("Today's outfit recommendation", responseData)
             );
 
         } catch (err) {
@@ -1058,8 +1071,10 @@ class OutfitController {
             const cached = await getCachedData(cacheKey);
 
             if (cached) {
+                // Phase 4: see getTodayOutfit's cache-hit comment -- cached
+                // value is now the whole {suggestions, tripMode, tripGap} shape.
                 return res.status(200).json({
-                    ...buildSuccessResponse("Tomorrow's outfit recommendation", { suggestions: cached }),
+                    ...buildSuccessResponse("Tomorrow's outfit recommendation", cached),
                     cached: true
                 });
             }
@@ -1093,11 +1108,13 @@ class OutfitController {
                 );
             }
 
+            const responseData = { suggestions, tripMode: result.tripMode || false, tripGap: result.tripGap || null };
+
             // Cache for 12 hours
-            await setCachedData(cacheKey, suggestions, 43200);
+            await setCachedData(cacheKey, responseData, 43200);
 
             return res.status(200).json(
-                buildSuccessResponse("Tomorrow's outfit recommendation", { suggestions })
+                buildSuccessResponse("Tomorrow's outfit recommendation", responseData)
             );
 
         } catch (err) {
@@ -1153,8 +1170,10 @@ class OutfitController {
             const cached = await getCachedData(cacheKey);
 
             if (cached) {
+                // Phase 4: see getTodayOutfit's cache-hit comment -- cached
+                // value is now the whole {suggestions, tripMode, tripGap} shape.
                 return res.status(200).json({
-                    ...buildSuccessResponse('Custom outfit recommendation', { suggestions: cached }),
+                    ...buildSuccessResponse('Custom outfit recommendation', cached),
                     cached: true
                 });
             }
@@ -1184,11 +1203,13 @@ class OutfitController {
                 );
             }
 
+            const responseData = { suggestions, tripMode: result.tripMode || false, tripGap: result.tripGap || null };
+
             // Cache for 24 hours
-            await setCachedData(cacheKey, suggestions, 86400);
+            await setCachedData(cacheKey, responseData, 86400);
 
             return res.status(200).json(
-                buildSuccessResponse('Custom outfit recommendation generated', { suggestions })
+                buildSuccessResponse('Custom outfit recommendation generated', responseData)
             );
 
         } catch (err) {

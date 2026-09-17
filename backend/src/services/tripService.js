@@ -35,7 +35,7 @@ class TripService {
       // ✅ STEPS 4-6: Fetch weather, parse activities, generate packing
       // list -- shared with regeneratePackingList() below, so both paths
       // stay in sync instead of duplicating this logic.
-      const { weatherResult, activities, packingListResult } = await this._generateWeatherAndPackingList(userId, {
+      const { weatherResult, activities, packingListResult, resolvedLuggageConstraints } = await this._generateWeatherAndPackingList(userId, {
         city,
         country,
         startDate: validatedData.startDate,
@@ -67,6 +67,7 @@ class TripService {
         weatherData: weatherResult.dailyWeather,
         packingList: packingListResult,
         activities: activities.length > 0 ? activities : null,
+        luggageConstraints: resolvedLuggageConstraints,
         notes: validatedData.notes,
         companions: validatedData.companions || 1,
         status,
@@ -130,13 +131,22 @@ class TripService {
 
     const { city, country } = this._parseDestination(trip.destination);
 
-    const { weatherResult, activities, packingListResult } = await this._generateWeatherAndPackingList(userId, {
+    // Phase 4 fix: this used to pass only overrides.luggageConstraints,
+    // which is undefined on most regenerates (the client didn't change
+    // it) -- _generateWeatherAndPackingList would then fall all the way
+    // back to a hardcoded tripType preset, silently discarding whatever
+    // the user had actually chosen on a previous create/regenerate.
+    // Falling back to the trip's own stored luggageConstraints first
+    // means "the user's real choice" is what's remembered, and the
+    // tripType preset is only ever used the very first time, before any
+    // choice exists yet.
+    const { weatherResult, activities, packingListResult, resolvedLuggageConstraints } = await this._generateWeatherAndPackingList(userId, {
       city,
       country,
       startDate: trip.startDate,
       endDate: trip.endDate,
       activitiesInput: overrides.activities || trip.activities,
-      luggageConstraints: overrides.luggageConstraints,
+      luggageConstraints: overrides.luggageConstraints || trip.luggageConstraints,
       tripType: trip.tripType,
       destination: trip.destination
     });
@@ -145,7 +155,8 @@ class TripService {
       weatherSummary: weatherResult.summary,
       weatherData: weatherResult.dailyWeather,
       packingList: packingListResult,
-      activities: activities.length > 0 ? activities : trip.activities
+      activities: activities.length > 0 ? activities : trip.activities,
+      luggageConstraints: resolvedLuggageConstraints
     });
 
     // If this trip is currently the user's active trip, refresh the
@@ -183,31 +194,32 @@ class TripService {
     logger.info('Updating trip', { userId, tripId });
 
     const trip = await Trip.findOne({ where: { id: tripId, userId } });
-    
+
     if (!trip) {
       throw new Error('Trip not found');
     }
 
     // If dates changed, recalculate weather and packing
     const datesChanged = updateData.startDate || updateData.endDate;
-    
+
     if (datesChanged) {
       const newStartDate = updateData.startDate ? new Date(updateData.startDate) : trip.startDate;
       const newEndDate = updateData.endDate ? new Date(updateData.endDate) : trip.endDate;
-      
+
       // Validate new dates
       this._validateDates(newStartDate, newEndDate);
-      
+
       // Recalculate duration
       updateData.durationDays = this._calculateDuration(newStartDate, newEndDate);
-      
+
       // Update status
       updateData.status = this._determineTripStatus(newStartDate, newEndDate);
-      
+
       // If trip is active or was active, update trip mode
       const user = await User.findByPk(userId);
+      const tripEnding = updateData.status === 'completed' || updateData.status === 'cancelled';
       if (user.activeTripId === tripId) {
-        if (updateData.status === 'completed' || updateData.status === 'cancelled') {
+        if (tripEnding) {
           // Deactivate trip mode
           await user.deactivateTrip();
           logger.info('Trip mode deactivated due to trip update', { userId, tripId });
@@ -218,6 +230,52 @@ class TripService {
           await user.save();
         }
       }
+
+      // Phase 4 fix: an extended/shortened trip used to leave
+      // weatherData/packingList exactly as they were for the old date
+      // range -- a trip extended by three days had no weather or
+      // packing guidance at all for those new days, and a shortened
+      // trip kept packing guidance for days that no longer exist.
+      // Regenerate through the same shared helper createTrip() and
+      // regeneratePackingList() already use, scoped to whatever stored
+      // activities still fall inside the new date range (an activity for
+      // a day that got trimmed off is dropped, not silently kept around).
+      if (!tripEnding) {
+        const destination = updateData.destination || trip.destination;
+        const { city, country } = this._parseDestination(destination);
+        const startKey = this._toDateKey(newStartDate);
+        const endKey = this._toDateKey(newEndDate);
+        const activitiesInRange = (trip.activities || []).filter((a) => this._toDateKey(a.date) >= startKey && this._toDateKey(a.date) <= endKey);
+
+        const { weatherResult, activities, packingListResult, resolvedLuggageConstraints } = await this._generateWeatherAndPackingList(userId, {
+          city,
+          country,
+          startDate: newStartDate,
+          endDate: newEndDate,
+          activitiesInput: activitiesInRange,
+          luggageConstraints: trip.luggageConstraints,
+          tripType: updateData.tripType || trip.tripType,
+          destination
+        });
+
+        updateData.weatherSummary = weatherResult.summary;
+        updateData.weatherData = weatherResult.dailyWeather;
+        updateData.packingList = packingListResult;
+        updateData.activities = activities.length > 0 ? activities : activitiesInRange;
+        updateData.luggageConstraints = resolvedLuggageConstraints;
+
+        if (user.activeTripId === tripId && packingListResult) {
+          await this._activateTripMode(userId, tripId, packingListResult, {
+            startDate: newStartDate,
+            endDate: newEndDate,
+            destination
+          });
+        }
+
+        logger.info('Packing list regenerated for changed trip dates', {
+          userId, tripId, totalItems: packingListResult?.tripWardrobe?.totalItems ?? 0
+        });
+      }
     }
 
     // Update trip
@@ -226,6 +284,54 @@ class TripService {
     logger.info('Trip updated successfully', { userId, tripId });
 
     return trip;
+  }
+
+  /**
+   * ✅ UPDATE A SINGLE DAY'S ACTIVITIES (Phase 4)
+   *
+   * Lets the caller add/change/remove one day's plan (e.g. "actually
+   * we're going hiking Tuesday, not a museum") without resending the
+   * trip's entire `activities` array -- the client only ever needs to
+   * know about the one day it's editing. Internally this still runs the
+   * same full regenerate the capsule algorithm needs (a single-day
+   * change can legitimately change what's reused on other days too), so
+   * the simplification here is in the request contract, not a shortcut
+   * in the packing logic itself.
+   *
+   * @param {string} userId
+   * @param {string} tripId
+   * @param {string} date - ISO date (YYYY-MM-DD), must fall within the trip
+   * @param {Array} slots - [{time, occasion}], or [] / undefined to clear that day's plan
+   */
+  async updateDayActivity(userId, tripId, date, slots) {
+    logger.info('Updating single-day activity', { userId, tripId, date });
+
+    const trip = await Trip.findOne({ where: { id: tripId, userId } });
+    if (!trip) {
+      throw new Error('Trip not found');
+    }
+
+    const dateKey = this._toDateKey(date);
+    const startKey = this._toDateKey(trip.startDate);
+    const endKey = this._toDateKey(trip.endDate);
+
+    if (dateKey < startKey || dateKey > endKey) {
+      throw new Error(`Date ${dateKey} is outside this trip's range (${startKey} to ${endKey})`);
+    }
+
+    const otherDays = (trip.activities || []).filter((a) => this._toDateKey(a.date) !== dateKey);
+    const hasSlots = Array.isArray(slots) && slots.length > 0;
+    const updatedActivities = hasSlots
+      ? [...otherDays, { date: dateKey, slots }]
+      : otherDays; // no slots -- clearing this day's plan entirely
+
+    const result = await this.regeneratePackingList(userId, tripId, { activities: updatedActivities });
+
+    logger.info('Single-day activity updated, packing list regenerated', {
+      userId, tripId, date: dateKey, cleared: !hasSlots
+    });
+
+    return result;
   }
 
   /**
@@ -417,6 +523,14 @@ class TripService {
     const durationDays = this._calculateDuration(startDate, endDate);
     const activities = this._parseActivities(activitiesInput, startDate, durationDays);
 
+    // Phase 4: luggage/bag preference promoted to a persisted trip input.
+    // Whatever constraints actually get used here -- an explicit
+    // override, or (now) the trip's own remembered choice, falling back
+    // to the tripType preset only when neither exists yet -- are handed
+    // back to the caller so it can save them on the trip row instead of
+    // discarding the resolution on every call.
+    const resolvedLuggageConstraints = luggageConstraints || this._getDefaultLuggageConstraints(tripType);
+
     let packingListResult = null;
     if (activities.length > 0) {
       logger.info('Generating packing list', { userId, activities: activities.length });
@@ -426,7 +540,7 @@ class TripService {
         dates: this._generateDateArray(startDate, endDate),
         activities,
         destination,
-        luggageConstraints: luggageConstraints || this._getDefaultLuggageConstraints(tripType),
+        luggageConstraints: resolvedLuggageConstraints,
         weatherData: weatherResult.dailyWeather
       });
 
@@ -436,7 +550,7 @@ class TripService {
       });
     }
 
-    return { weatherResult, activities, packingListResult };
+    return { weatherResult, activities, packingListResult, resolvedLuggageConstraints };
   }
 
   /**
@@ -513,7 +627,15 @@ class TripService {
     // If activities is array of objects with 'date' field
     if (activitiesInput[0]?.date) {
       return activitiesInput.map(activity => ({
-        date: activity.date,
+        // Phase 4 fix: normalize whatever date format arrives here (a
+        // plain "2025-01-15", or a full ISO timestamp from an older
+        // client, a stored trip.activities row, or -- before the
+        // validation-layer fix -- Joi's own isoDate() reformatting) down
+        // to the plain YYYY-MM-DD key every other date-keyed structure
+        // in this codebase uses (weatherData, weatherByDate lookups,
+        // forecast-accuracy rows). A mismatched format here silently
+        // means "this day's weather is never found" downstream.
+        date: this._toDateKey(activity.date),
         slots: activity.slots || [{ time: 'all-day', occasion: activity.occasion || 'casual' }]
       }));
     }
@@ -547,6 +669,15 @@ class TripService {
     }
 
     return activities;
+  }
+
+  /**
+   * Normalize any date-ish input (plain "YYYY-MM-DD", a full ISO
+   * timestamp, or a Date object) to the plain YYYY-MM-DD key every
+   * date-keyed structure in this codebase uses.
+   */
+  _toDateKey(date) {
+    return new Date(date).toISOString().split('T')[0];
   }
 
   /**

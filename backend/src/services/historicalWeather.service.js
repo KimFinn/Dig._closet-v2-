@@ -1,6 +1,10 @@
 /**
- * Historical (actual, not forecast) weather — Phase 3, for
- * WeatherOutcome forecast-accuracy tracking.
+ * Historical (actual, not forecast) weather. Originally Phase 3, for
+ * WeatherOutcome forecast-accuracy tracking; Phase 4 adds a second
+ * caller (weather.service.js's far-future packing estimate, which looks
+ * up a prior year's actual weather for a trip date too far out for a
+ * real forecast) and, more importantly, a permanent dedup store shared
+ * by both.
  *
  * Deliberately a separate provider from weather.service.js (OpenWeather,
  * forecasts only). OpenWeather's historical/actuals data is a paid
@@ -16,6 +20,19 @@
  * instead of a place name) is also Open-Meteo's own free endpoint, and
  * is Redis-cached with a long TTL -- a city's coordinates don't change,
  * so there's no reason to re-resolve them on every call.
+ *
+ * Phase 4: getHistoricalWeatherForDate() now checks
+ * HistoricalWeatherRecord (a permanent Postgres table, not a
+ * time-limited cache -- see migration
+ * 20260920000001-create-historical-weather-records for the full
+ * rationale) before ever calling Open-Meteo, and writes the result
+ * there after a successful fetch. Unlike the Redis caches in this file
+ * and weather.service.js, this store has no TTL/expiry at all --
+ * historical weather is an immutable fact once observed, so "cached
+ * forever" is simply correct here, not a shortcut. This is what makes a
+ * second user planning a trip to the same city around the same dates
+ * skip the Open-Meteo call entirely, and what stops this same trip's
+ * own far-future estimate from re-fetching on every regenerate.
  */
 
 // Uses the global `fetch` (Node 18+) rather than axios, deliberately --
@@ -23,6 +40,18 @@
 // GET calls.
 const redis = require('redis');
 const logger = require('../utils/logger');
+// Lazy require to avoid a circular require at module-load time --
+// database/models/index.js doesn't touch this file, so a top-level
+// require would be safe too, but this matches how other services in
+// this codebase avoid circularity issues (see AIOutfit recommendation.js's
+// preferenceLearningQueue require).
+let HistoricalWeatherRecord = null;
+function getModel() {
+  if (!HistoricalWeatherRecord) {
+    HistoricalWeatherRecord = require('../database/models').HistoricalWeatherRecord;
+  }
+  return HistoricalWeatherRecord;
+}
 
 const GEOCODING_URL = 'https://geocoding-api.open-meteo.com/v1/search';
 const ARCHIVE_URL = 'https://archive-api.open-meteo.com/v1/archive';
@@ -123,6 +152,26 @@ async function geocode(city, country) {
 async function getHistoricalWeatherForDate(city, country, date) {
   if (!city) return null;
 
+  const normalizedCountry = country || null;
+
+  // Phase 4: check the permanent dedup store first -- a hit here means
+  // zero network calls at all (no geocode, no archive fetch), which is
+  // the whole point of persisting an immutable fact instead of
+  // re-deriving it. A DB read failure is treated the same as a miss
+  // (fall through to the real lookup) rather than failing the caller.
+  try {
+    const existing = await getModel().findOne({ where: { city: city.toLowerCase(), country: normalizedCountry ? normalizedCountry.toLowerCase() : null, date } });
+    if (existing) {
+      return {
+        temp: existing.temp === null ? null : Number(existing.temp),
+        condition: existing.condition,
+        precipitation: existing.precipitation === null ? 0 : Number(existing.precipitation),
+      };
+    }
+  } catch (error) {
+    logger.warn('Historical weather DB lookup failed, falling back to live fetch', { city, country, date, error: error.message });
+  }
+
   try {
     const { latitude, longitude } = await geocode(city, country);
 
@@ -148,11 +197,41 @@ async function getHistoricalWeatherForDate(city, country, date) {
 
     if (temp === null || temp === undefined) return null;
 
-    return {
+    const result = {
       temp,
       condition: wmoCodeToCondition(code),
       precipitation: precipitation || 0,
     };
+
+    // Persist the fact for next time -- any other trip, any other user,
+    // looking up this exact (city, country, date) again never needs to
+    // hit Open-Meteo. findOrCreate (not a blind create) guards against a
+    // race between two concurrent lookups for the same never-before-seen
+    // date; whichever writes first wins, the fact is identical either way.
+    try {
+      await getModel().findOrCreate({
+        where: { city: city.toLowerCase(), country: normalizedCountry ? normalizedCountry.toLowerCase() : null, date },
+        defaults: {
+          city: city.toLowerCase(),
+          country: normalizedCountry ? normalizedCountry.toLowerCase() : null,
+          date,
+          latitude,
+          longitude,
+          temp: result.temp,
+          condition: result.condition,
+          precipitation: result.precipitation,
+          source: 'open-meteo',
+          fetchedAt: new Date(),
+        },
+      });
+    } catch (writeError) {
+      // Never let a persistence failure take down the caller -- the
+      // lookup itself already succeeded, and worst case this date just
+      // gets fetched again next time instead of served from the store.
+      logger.warn('Historical weather DB write failed, continuing without caching it', { city, country, date, error: writeError.message });
+    }
+
+    return result;
   } catch (error) {
     logger.warn('Historical weather lookup failed, skipping this outcome check', {
       city, country, date, error: error.message,

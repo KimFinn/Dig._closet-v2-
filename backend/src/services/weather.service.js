@@ -1,6 +1,11 @@
 const axios = require("axios");
 const Redis = require('ioredis');
 const logger = require('../utils/logger');
+// Phase 4: far-future packing estimate. Safe as a top-level require --
+// historicalWeather.service.js never requires this file back, so there's
+// no circularity to worry about (unlike the lazy requires elsewhere in
+// this codebase that exist specifically to avoid that).
+const { getHistoricalWeatherForDate } = require('./historicalWeather.service');
 
 const API_KEY = process.env.WEATHER_API_KEY;
 const OPENWEATHER_BASE_URL = 'https://api.openweathermap.org/data/2.5';
@@ -281,7 +286,9 @@ class WeatherService {
                     5
                 );
 
-                // Get climate data for remaining days
+                // Get climate data for remaining days -- last-resort
+                // fallback for whichever remaining days _combineWithClimateData
+                // below can't find a real historical estimate for.
                 const climateData = await this._getClimateData(
                     response.data.city.coord.lat,
                     response.data.city.coord.lon,
@@ -289,11 +296,17 @@ class WeatherService {
                     end
                 );
 
-                // Combine forecast + climate data
-                forecastData = this._combineWithClimateData(
+                // Combine forecast + (historical estimate, falling back to
+                // climate averages) for the remaining days. Phase 4: this
+                // used to be pure climate-average guessing for every
+                // remaining day; now it tries real prior-year weather for
+                // this city/date first (see _getHistoricalEstimateForDate).
+                forecastData = await this._combineWithClimateData(
                     fiveDayForecast,
                     climateData,
-                    daysDiff
+                    daysDiff,
+                    city,
+                    country
                 );
             }
 
@@ -556,48 +569,134 @@ class WeatherService {
     }
 
     /**
-     * Combine 5-day forecast with climate data for extended trips
+     * Try real prior-year historical weather for one far-future date
+     * before falling back to a hardcoded seasonal guess. Tries last
+     * year's same calendar date first, then the year before that (a
+     * single missing/failed year -- e.g. an archive gap, or the
+     * lookup's own network error -- shouldn't force the coarser
+     * fallback when one more year back would likely have real data).
+     * Returns null (never throws) if neither year has usable data --
+     * historicalWeather.service.js already treats lookup failures as
+     * "skip", and this does the same one level up.
      * @private
      */
-    static _combineWithClimateData(forecastData, climateData, totalDays) {
+    static async _getHistoricalEstimateForDate(city, country, estimateDate) {
+        if (!city || !country) return null;
+
+        for (const yearsBack of [1, 2]) {
+            const anchor = new Date(estimateDate);
+            anchor.setFullYear(anchor.getFullYear() - yearsBack);
+            const anchorKey = anchor.toISOString().split('T')[0];
+
+            try {
+                const result = await getHistoricalWeatherForDate(city, country, anchorKey);
+                if (result && typeof result.temp === 'number') {
+                    return { ...result, anchorDate: anchorKey };
+                }
+            } catch (error) {
+                logger.warn('Historical estimate lookup failed for one anchor year, trying an earlier year', {
+                    city, country, anchorKey, error: error.message
+                });
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Combine 5-day forecast with a far-future estimate for the
+     * remaining days of a trip.
+     *
+     * Phase 4: previously every remaining day got the same flat
+     * hardcoded seasonal-average guess (_getMonthlyClimateAverages --
+     * 12 fixed numbers, no notion of *this* city at all). Now each
+     * remaining day first tries a real historical-estimate lookup (last
+     * year's, or the year before's, actual recorded weather for this
+     * city on this calendar date -- see _getHistoricalEstimateForDate,
+     * backed by historicalWeather.service.js's permanent dedup store, so
+     * this costs nothing on a second trip to the same place/time).
+     * `climateData` (the old hardcoded curve) is kept as the genuine
+     * last resort -- only used for a day where even the historical
+     * lookup comes back empty (e.g. a brand-new destination with no
+     * archive coverage, or the lookup failing outright).
+     * @private
+     */
+    static async _combineWithClimateData(forecastData, climateData, totalDays, city, country) {
         const daysWithForecast = Object.keys(forecastData.dailyForecasts).length;
         const remainingDays = totalDays - daysWithForecast;
-        
-        logger.info('Combining forecast with climate data', {
+
+        logger.info('Combining forecast with far-future estimate for remaining days', {
             forecastDays: daysWithForecast,
-            climateDays: remainingDays,
-            totalDays
+            estimateDays: remainingDays,
+            totalDays,
+            city
         });
 
-        // Add climate-based estimates for remaining days
         const lastForecastDate = new Date(
             Math.max(...Object.keys(forecastData.dailyForecasts).map(d => new Date(d)))
         );
+
+        let historicalEstimateDays = 0;
+        let climateAverageDays = 0;
 
         for (let i = 1; i <= remainingDays; i++) {
             const estimateDate = new Date(lastForecastDate);
             estimateDate.setDate(estimateDate.getDate() + i);
             const dateKey = estimateDate.toISOString().split('T')[0];
 
-            forecastData.dailyForecasts[dateKey] = {
-                date: estimateDate,
-                tempMin: climateData.avgTemp - 3,
-                tempMax: climateData.avgTemp + 3,
-                tempAvg: climateData.avgTemp,
-                dominantCondition: 'Estimated',
-                avgHumidity: 65,
-                maxPrecipitation: climateData.avgPrecipitation,
-                isEstimate: true,
-                source: 'climate_average'
-            };
+            const historical = await this._getHistoricalEstimateForDate(city, country, estimateDate);
+
+            if (historical) {
+                historicalEstimateDays += 1;
+                // Open-Meteo's precipitation_sum is millimeters actually
+                // recorded that day, not a 0-100 probability like
+                // OpenWeather's `pop`-derived values elsewhere in this
+                // file -- there's no "probability" for a day that already
+                // happened. Scaled onto the same 0-100 range the rest of
+                // this service uses (getMultiDayWeatherForTrip divides by
+                // 100 again downstream) so a "did it rain" signal is
+                // still comparable: 5mm+ maxes it out as fully wet.
+                const precipProxy = Math.min(100, (historical.precipitation || 0) * 20);
+                forecastData.dailyForecasts[dateKey] = {
+                    date: estimateDate,
+                    tempMin: historical.temp - 3,
+                    tempMax: historical.temp + 3,
+                    tempAvg: Math.round(historical.temp),
+                    dominantCondition: historical.condition || 'estimated',
+                    avgHumidity: 65,
+                    maxPrecipitation: precipProxy,
+                    isEstimate: true,
+                    forecastType: 'historical-estimate',
+                    source: 'historical-estimate',
+                    historicalAnchorDate: historical.anchorDate,
+                };
+            } else {
+                climateAverageDays += 1;
+                forecastData.dailyForecasts[dateKey] = {
+                    date: estimateDate,
+                    tempMin: climateData.avgTemp - 3,
+                    tempMax: climateData.avgTemp + 3,
+                    tempAvg: climateData.avgTemp,
+                    dominantCondition: 'Estimated',
+                    avgHumidity: 65,
+                    maxPrecipitation: climateData.avgPrecipitation,
+                    isEstimate: true,
+                    forecastType: 'climate-average',
+                    source: 'climate_average'
+                };
+            }
         }
+
+        logger.info('Far-future estimate breakdown', { historicalEstimateDays, climateAverageDays });
 
         // Update summary to reflect full trip
         forecastData.durationDays = totalDays;
         forecastData.hasEstimates = true;
         forecastData.forecastDays = daysWithForecast;
         forecastData.estimatedDays = remainingDays;
-        
+        forecastData.historicalEstimateDays = historicalEstimateDays;
+        forecastData.climateAverageDays = climateAverageDays;
+
         return forecastData;
     }
 
@@ -696,6 +795,29 @@ static async getMultiDayWeatherForTrip(city, country, startDate, endDate) {
             const dayForecast = dailyForecasts[dateKey];
 
             if (dayForecast) {
+                // Phase 4: dayForecast.forecastType is now set explicitly
+                // by _combineWithClimateData ('historical-estimate' vs
+                // 'climate-average') for an estimated day -- respect it
+                // instead of collapsing every estimate into the same
+                // 'climate-average' bucket, so isMeaningfulDrift() and the
+                // packing hedge can tell a real prior-year data point
+                // apart from a pure guess.
+                const forecastType = dayForecast.forecastType || (dayForecast.isEstimate ? 'climate-average' : 'specific');
+                let forecastAccuracy;
+                if (i < 3) forecastAccuracy = 'high';
+                else if (forecastType === 'historical-estimate') forecastAccuracy = 'medium-low';
+                else if (dayForecast.isEstimate) forecastAccuracy = 'low';
+                else forecastAccuracy = 'medium';
+
+                // User-facing confidence label -- surfaced in the packing
+                // list so a historical-estimate day is never presented as
+                // equally certain as a live forecast or the final ~3-day
+                // lock-in window (PRD §3.12).
+                let confidence;
+                if (forecastType === 'specific') confidence = i < 3 ? 'final' : 'forecast';
+                else if (forecastType === 'historical-estimate') confidence = 'estimate';
+                else confidence = 'rough-estimate';
+
                 dailyWeatherArray.push({
                     date: dateKey,
                     temp: dayForecast.tempAvg,
@@ -709,8 +831,10 @@ static async getMultiDayWeatherForTrip(city, country, startDate, endDate) {
                     precipitation: dayForecast.maxPrecipitation / 100, // Convert to 0-1
                     uvIndex: 5, // Default
                     visibility: 10000,
-                    forecastAccuracy: i < 3 ? 'high' : (dayForecast.isEstimate ? 'low' : 'medium'),
-                    forecastType: dayForecast.isEstimate ? 'climate-average' : 'specific'
+                    forecastAccuracy,
+                    forecastType,
+                    confidence,
+                    historicalAnchorDate: dayForecast.historicalAnchorDate || null,
                 });
             } else {
                 // Fallback for missing data
@@ -731,9 +855,17 @@ static async getMultiDayWeatherForTrip(city, country, startDate, endDate) {
  * @private
  */
 static _generateFallbackWeatherArray(startDate, endDate) {
+    // Pre-existing bug, found live while verifying Phase 4 (a real
+    // OpenWeather-fetch failure -- e.g. no WEATHER_API_KEY configured --
+    // takes this path): the divisor was `1000 * 60 * 60 * 1000`
+    // (milliseconds-per-hour times 1000, not milliseconds-per-day), so
+    // a 4-day trip's duration came out as ~0.004 days -> Math.ceil -> 1.
+    // Every day past the first silently had no weather entry at all,
+    // which is also why forecastConfidence's per-day breakdown below
+    // came back "unknown" for days this array should have covered.
     const start = new Date(startDate);
     const end = new Date(endDate);
-    const durationDays = Math.ceil((end - start) / (1000 * 60 * 60 * 1000));
+    const durationDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
     const weatherArray = [];
 
     for (let i = 0; i < durationDays; i++) {
@@ -767,7 +899,8 @@ static _generateFallbackWeatherForDate(date) {
         uvIndex: 5,
         visibility: 10000,
         forecastAccuracy: 'fallback',
-        forecastType: 'seasonal-average'
+        forecastType: 'seasonal-average',
+        confidence: 'rough-estimate'
     };
 }
 

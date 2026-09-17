@@ -61,11 +61,59 @@ const REQUIRED_CATEGORY_SETS = [
   ['dress', 'footwear'],
 ];
 
-function needsOuterwear(weather) {
-  if (!weather) return false;
+// forecastType values (see weather.service.js) that carry real
+// uncertainty -- not a live forecast, so worth hedging against.
+// 'historical-estimate' (Phase 4: real prior-year data) is here too,
+// despite being better than a flat guess -- it's still a different
+// year's weather standing in for this year's, which can genuinely be
+// wrong in a way a same-week forecast rarely is.
+const LOW_CONFIDENCE_FORECAST_TYPES = new Set(['historical-estimate', 'climate-average', 'seasonal-average']);
+
+/**
+ * Confidence-aware packing hedge (Phase 4). A wrong guess here has a
+ * real cost that a same-week forecast miss doesn't: the traveler is
+ * carrying only a fraction of their wardrobe, so "no warm/rain layer
+ * available at all" is the actual failure mode, not just a slightly
+ * off outfit. Returns the certain need first (genuinely cold/wet by
+ * the normal bar), then a softer hedge bar for lower-confidence days --
+ * bias toward packing a versatile buffer layer even when the estimate
+ * is only moderately cool or damp, not just when it clears the same bar
+ * a live forecast would need to.
+ */
+function outerwearNeed(weather) {
+  if (!weather) return { needed: false, reason: null };
+
   const cold = typeof weather.temp === 'number' && weather.temp < 12;
   const wet = typeof weather.precipitation === 'number' && weather.precipitation > 0.4;
-  return cold || wet;
+  if (cold) return { needed: true, reason: 'cold' };
+  if (wet) return { needed: true, reason: 'wet' };
+
+  if (LOW_CONFIDENCE_FORECAST_TYPES.has(weather.forecastType)) {
+    const borderlineCold = typeof weather.temp === 'number' && weather.temp < 16;
+    const borderlineWet = typeof weather.precipitation === 'number' && weather.precipitation > 0.2;
+    if (borderlineCold || borderlineWet) return { needed: true, reason: 'confidence-hedge' };
+  }
+
+  return { needed: false, reason: null };
+}
+
+function needsOuterwear(weather) {
+  return outerwearNeed(weather).needed;
+}
+
+/**
+ * User-facing confidence label for a day's weather, mirrors the
+ * `confidence` field weather.service.js already attaches per day
+ * (final/forecast/estimate/rough-estimate), with a safe fallback for
+ * weather objects that predate that field.
+ */
+function weatherConfidence(weather) {
+  if (!weather) return null;
+  if (weather.confidence) return weather.confidence;
+  if (weather.forecastType === 'specific') return 'forecast';
+  if (weather.forecastType === 'historical-estimate') return 'estimate';
+  if (LOW_CONFIDENCE_FORECAST_TYPES.has(weather.forecastType)) return 'rough-estimate';
+  return null;
 }
 
 // ----------------------------------------------------------------------
@@ -199,13 +247,15 @@ function assignContext(context, wardrobeByCategory, capsule, itemsById, gaps) {
     gaps.push({ date: context.date, time: context.time, occasion: context.occasion, category: 'footwear', message: `No suitable footwear for ${context.date}.` });
   }
 
-  if (needsOuterwear(context.weather)) {
+  const outerwear = outerwearNeed(context.weather);
+  if (outerwear.needed) {
     const outerwearPick = pickForCategory('outerwear');
     if (outerwearPick) {
       chosenIds.push(outerwearPick.item.id);
       capsule.get('outerwear').add(outerwearPick.item.id);
     } else {
-      gaps.push({ date: context.date, time: context.time, occasion: context.occasion, category: 'outerwear', message: `No warm/rain layer available for ${context.date}${context.weather ? ` (${Math.round(context.weather.temp)}°C${context.weather.precipitation > 0.4 ? ', wet' : ''})` : ''}.` });
+      const hedgeNote = outerwear.reason === 'confidence-hedge' ? ' (packed as a buffer -- this day\'s weather is an estimate, not a live forecast)' : '';
+      gaps.push({ date: context.date, time: context.time, occasion: context.occasion, category: 'outerwear', message: `No warm/rain layer available for ${context.date}${context.weather ? ` (${Math.round(context.weather.temp)}°C${context.weather.precipitation > 0.4 ? ', wet' : ''})` : ''}${hedgeNote}.` });
     }
   }
 
@@ -214,6 +264,10 @@ function assignContext(context, wardrobeByCategory, capsule, itemsById, gaps) {
     time: context.time,
     occasion: context.occasion,
     weather: context.weather ? { temp: context.weather.temp, condition: context.weather.condition } : null,
+    // Phase 4: transparency -- never present an estimate as equally
+    // certain as a live forecast or the final locked-in window.
+    weatherConfidence: weatherConfidence(context.weather),
+    outerwearHedge: outerwear.reason === 'confidence-hedge',
     itemIds: chosenIds,
     items: chosenIds.map((id) => {
       const it = itemsById.get(id);
@@ -284,7 +338,31 @@ async function generatePackingList({ userId, dates, activities, destination, lug
   const tripWardrobeItems = Array.from(allPackedIds);
 
   const constraints = luggageConstraints || {};
-  const overLimit = typeof constraints.maxItems === 'number' && tripWardrobeItems.length > constraints.maxItems;
+  // Phase 4: basic multi-bag support. `bags: [{name, type, maxItems}]`
+  // sums to one effective capacity for the over-limit check -- which
+  // specific item goes in which specific bag is out of scope for this
+  // pass (same simplification tradeoff the single-limit flag-don't-solve
+  // approach below already makes), but at least a user who splits
+  // "carry-on + checked bag" isn't held to a single bag's item count.
+  const hasBags = Array.isArray(constraints.bags) && constraints.bags.length > 0;
+  const effectiveMaxItems = hasBags
+    ? constraints.bags.reduce((sum, bag) => sum + (typeof bag.maxItems === 'number' ? bag.maxItems : 0), 0)
+    : constraints.maxItems;
+  const overLimit = typeof effectiveMaxItems === 'number' && effectiveMaxItems > 0 && tripWardrobeItems.length > effectiveMaxItems;
+
+  // Phase 4: forecast-confidence transparency -- one row per day (not
+  // per slot, since weather is the same across a day's slots), so the
+  // caller can show "N of your M days are based on an estimate, not a
+  // live forecast" instead of presenting every day as equally certain.
+  const confidenceCounts = {};
+  let hedgedDays = 0;
+  for (const day of dailyGuide) {
+    const firstSlot = day.slots[0];
+    const confidence = firstSlot?.weatherConfidence || 'unknown';
+    confidenceCounts[confidence] = (confidenceCounts[confidence] || 0) + 1;
+    if (day.slots.some((s) => s.outerwearHedge)) hedgedDays += 1;
+  }
+  const estimatedDayCount = (confidenceCounts.estimate || 0) + (confidenceCounts['rough-estimate'] || 0);
 
   logger.info('Packing list generated', {
     userId,
@@ -292,6 +370,7 @@ async function generatePackingList({ userId, dates, activities, destination, lug
     totalItems: tripWardrobeItems.length,
     gaps: gaps.length,
     overLuggageLimit: overLimit,
+    estimatedDayCount,
   });
 
   return {
@@ -313,8 +392,18 @@ async function generatePackingList({ userId, dates, activities, destination, lug
     // first pass. The flag tells the caller (and the user) to either
     // loosen the limit or trim manually.
     luggageWarning: overLimit
-      ? `Capsule needs ${tripWardrobeItems.length} items, over your ${constraints.maxItems}-item limit.`
+      ? `Capsule needs ${tripWardrobeItems.length} items, over your ${effectiveMaxItems}-item limit${hasBags ? ' across your bags' : ''}.`
       : null,
+    // Phase 4: transparency (PRD §3.12) -- never let an estimate-based
+    // day look as certain as a live forecast to the user.
+    forecastConfidence: {
+      byDay: confidenceCounts,
+      estimatedDayCount,
+      hedgedDayCount: hedgedDays,
+      note: estimatedDayCount > 0
+        ? `${estimatedDayCount} of ${dailyGuide.length} day(s) use a weather estimate (historical or seasonal), not a live forecast -- ${hedgedDays > 0 ? `a buffer layer was added on ${hedgedDays} of them, and ` : ''}this list will tighten up automatically as the trip gets closer.`
+        : null,
+    },
     requestedFor: { userId, destination, dayCount: Array.isArray(dates) ? dates.length : 0 },
   };
 }

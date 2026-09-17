@@ -31,10 +31,12 @@
  *     unique index exists on (trip_id, date) and because this job
  *     pre-checks for an existing row before calling the API at all --
  *     so a trip's history doesn't get re-scanned night after night once
- *     it's fully accounted for. Only "specific" forecasts (not
- *     climate-average estimates) are compared -- comparing an actual
- *     against an estimate that was never meant to be precise isn't a
- *     useful accuracy signal.
+ *     it's fully accounted for. "specific" forecasts and (Phase 4)
+ *     "historical-estimate" days are compared -- both are real data
+ *     points, not guesses. Pure placeholder types (climate-average,
+ *     seasonal-average -- see NON_COMPARABLE_FORECAST_TYPES) are
+ *     skipped, since comparing an actual against a number that was
+ *     never meant to be precise isn't a useful accuracy signal.
  *
  * Per-run caps on both passes exist for the same reason
  * checkInQueue.js's MAX_EMAILS_PER_RUN does: a bug that somehow widens
@@ -102,15 +104,24 @@ function toDateKey(d) {
   return new Date(d).toISOString().split('T')[0];
 }
 
+// forecastType values that are pure placeholder guesses -- not tied to
+// any real observation for this city -- and therefore never a
+// meaningful drift signal against anything. 'historical-estimate'
+// (Phase 4) is deliberately NOT in this set: it's real prior-year
+// observed data for this city/date, so a live forecast later disagreeing
+// with it is exactly the kind of drift worth replanning for.
+const NON_COMPARABLE_FORECAST_TYPES = new Set(['climate-average', 'seasonal-average']);
+
 /**
  * True if the two forecasts for the same date differ enough to be worth
- * regenerating the packing list over. Both null/climate-average inputs
- * are treated as "not comparable" -- an estimate drifting from another
- * estimate isn't a real signal.
+ * regenerating the packing list over. A pure-guess forecastType on
+ * either side is treated as "not comparable" -- an estimate drifting
+ * from another estimate isn't a real signal. A historical-estimate
+ * (Phase 4: real prior-year data, not a guess) IS comparable.
  */
 function isMeaningfulDrift(oldDay, newDay) {
   if (!oldDay || !newDay) return false;
-  if (oldDay.forecastType === 'climate-average' || newDay.forecastType === 'climate-average') return false;
+  if (NON_COMPARABLE_FORECAST_TYPES.has(oldDay.forecastType) || NON_COMPARABLE_FORECAST_TYPES.has(newDay.forecastType)) return false;
 
   const oldTemp = typeof oldDay.temp === 'number' ? oldDay.temp : null;
   const newTemp = typeof newDay.temp === 'number' ? newDay.temp : null;
@@ -234,7 +245,11 @@ async function runForecastAccuracyPass() {
     for (const day of trip.weatherData || []) {
       const dayDate = new Date(day.date);
       if (dayDate >= now || dayDate < lookbackStart) continue; // only already-passed days within the lookback window
-      if (day.forecastType === 'climate-average') continue; // not a meaningful accuracy comparison
+      // Phase 4: historical-estimate is real prior-year data, not a
+      // guess -- comparing it against what actually happened this year
+      // is a genuine accuracy signal for the estimate method, so it
+      // stays in (only the pure placeholder types are skipped).
+      if (NON_COMPARABLE_FORECAST_TYPES.has(day.forecastType)) continue;
 
       if (checked >= MAX_OUTCOME_CHECKS_PER_RUN) {
         logger.warn('Forecast-accuracy pass hit its per-run cap, stopping early', { cap: MAX_OUTCOME_CHECKS_PER_RUN });

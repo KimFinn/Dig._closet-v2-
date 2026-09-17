@@ -1103,6 +1103,21 @@ const Trip = sequelize.define('Trip', {
         allowNull: true,
         defaultValue: [],
         comment: 'Parsed day-by-day activities: [{date, slots: [{time, occasion}]}]'
+    },
+    luggageConstraints: {
+        // Phase 4: previously an ephemeral request override only --
+        // regeneratePackingList() silently fell back to a hardcoded
+        // tripType preset (_getDefaultLuggageConstraints) on every
+        // regenerate unless the caller resent the same override every
+        // time. Persisting the constraints actually used means the
+        // user's real choice (a specific maxItems, or a multi-bag split
+        // via `bags: [{name, type, maxItems}]`) is remembered. See
+        // migration 20260920000002-add-luggage-constraints-to-trips.
+        type: DataTypes.JSONB,
+        allowNull: true,
+        field: 'luggage_constraints',
+        defaultValue: null,
+        comment: 'e.g. {type, maxItems} or {bags: [{name, type, maxItems}]}'
     }
 }, {
     tableName: 'trips',
@@ -1236,6 +1251,34 @@ const WeatherOutcome = sequelize.define('WeatherOutcome', {
     checkedAt: { type: DataTypes.DATE, field: 'checked_at' }
 }, {
     tableName: 'weather_outcomes'
+});
+
+// Phase 4: permanent dedup store for observed (never-changing) historical
+// weather, keyed by (city, country, date) -- shared across every trip and
+// every user, unlike WeatherOutcome (Phase 3, per-trip). See migration
+// 20260920000001-create-historical-weather-records for the full
+// rationale. Read/written by historicalWeather.service.js.
+const HistoricalWeatherRecord = sequelize.define('HistoricalWeatherRecord', {
+    id: {
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
+        primaryKey: true
+    },
+    city: { type: DataTypes.STRING(100), allowNull: false },
+    country: { type: DataTypes.STRING(100), allowNull: true },
+    date: { type: DataTypes.DATEONLY, allowNull: false },
+    latitude: { type: DataTypes.DECIMAL(8, 5), allowNull: true },
+    longitude: { type: DataTypes.DECIMAL(8, 5), allowNull: true },
+    temp: { type: DataTypes.DECIMAL(5, 2), allowNull: true },
+    condition: { type: DataTypes.STRING(50), allowNull: true },
+    precipitation: { type: DataTypes.DECIMAL(6, 2), allowNull: true },
+    source: { type: DataTypes.STRING(50), defaultValue: 'open-meteo' },
+    fetchedAt: { type: DataTypes.DATE, field: 'fetched_at' }
+}, {
+    tableName: 'historical_weather_records',
+    indexes: [
+        { name: 'idx_historical_weather_city_country_date', unique: true, fields: ['city', 'country', 'date'] }
+    ]
 });
 
 //User Preferences Model - UPDATED TO PRODUCTION-READY VERSION
@@ -1793,5 +1836,6 @@ module.exports = {
     LearnedPreferences,
     TripActivity,
     TripParticipant,
-    WeatherOutcome
+    WeatherOutcome,
+    HistoricalWeatherRecord
 };

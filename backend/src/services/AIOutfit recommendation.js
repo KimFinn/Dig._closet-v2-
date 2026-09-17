@@ -680,7 +680,7 @@ class NeuralOutfitScorer {
     this.compatibilityModel = null;
   }
 
-  async scoreOutfit(items, context, userPreferences) {
+  async scoreOutfit(items, context, userPreferences, tripStartDate = null) {
     console.log(`[OutfitScorer] Scoring outfit with ${items.length} items`);
     
     const scores = {
@@ -721,7 +721,7 @@ class NeuralOutfitScorer {
     // in the last couple of days still shows up if it's genuinely the
     // best match (nothing here hard-filters it out), it's just ranked
     // below an equally-good fresher alternative.
-    const recency = this._scoreRecency(items);
+    const recency = this._scoreRecency(items, 2, tripStartDate);
     const totalScore = Math.min(1.0, Math.max(0.0, rawScore)) * recency.factor;
 
     const reasoning = this._generateDetailedReasoning(scores, items, context, recency);
@@ -743,14 +743,33 @@ class NeuralOutfitScorer {
    * determines the penalty, since a single very-recently-worn centerpiece
    * (e.g. the same jacket) makes an outfit feel repetitive even if every
    * other piece is new. No wear within the window -> no penalty at all.
+   *
+   * Phase 4: `tripStartDate` makes this trip-aware. Off-trip, a fixed
+   * 2-day window is the right heuristic against a full wardrobe. On a
+   * trip, the traveler only has a fraction of their wardrobe with them,
+   * so (a) a wear from *before* the trip started shouldn't count against
+   * an item at all -- it's not "recently worn" in any sense relevant to
+   * this trip -- and (b) the relevant window is "since the trip began",
+   * not a flat 2 days, so the system keeps preferring whatever hasn't
+   * been worn yet on this trip over what has, for as long as the trip
+   * runs. The penalty floor is also softer in trip mode (0.55 vs. 0.4):
+   * with a small packed capsule, some repeats are expected and not a
+   * real negative signal the way they'd be against a full closet.
    */
-  _scoreRecency(items, windowDays = 2) {
+  _scoreRecency(items, windowDays = 2, tripStartDate = null) {
     const DAY_MS = 24 * 60 * 60 * 1000;
     const now = Date.now();
+    const tripStartMs = tripStartDate ? new Date(tripStartDate).getTime() : null;
+
+    const effectiveWindowDays = tripStartMs
+      ? Math.max(windowDays, (now - tripStartMs) / DAY_MS)
+      : windowDays;
+    const minFactor = tripStartMs ? 0.55 : 0.4;
 
     const wornTimestamps = items
       .map(item => item.lastWornAt ? new Date(item.lastWornAt).getTime() : null)
-      .filter(ts => ts !== null && !Number.isNaN(ts));
+      .filter(ts => ts !== null && !Number.isNaN(ts))
+      .filter(ts => tripStartMs === null || ts >= tripStartMs);
 
     if (wornTimestamps.length === 0) {
       return { factor: 1.0, daysSinceMostRecentWear: null, note: null };
@@ -759,23 +778,22 @@ class NeuralOutfitScorer {
     const mostRecentWear = Math.max(...wornTimestamps);
     const daysSince = (now - mostRecentWear) / DAY_MS;
 
-    if (daysSince >= windowDays) {
+    if (daysSince >= effectiveWindowDays) {
       return { factor: 1.0, daysSinceMostRecentWear: Math.floor(daysSince), note: null };
     }
 
-    // Linear ramp: worn moments ago -> factor floors at 0.4 (still
+    // Linear ramp: worn moments ago -> factor floors at minFactor (still
     // suggestible if truly nothing else fits), worn right at the edge of
     // the window -> factor 1.0 (no penalty).
-    const minFactor = 0.4;
-    const factor = minFactor + (1 - minFactor) * Math.max(0, daysSince / windowDays);
+    const factor = minFactor + (1 - minFactor) * Math.max(0, daysSince / effectiveWindowDays);
     const daysSinceFloored = Math.max(0, Math.floor(daysSince));
 
     return {
       factor,
       daysSinceMostRecentWear: daysSinceFloored,
       note: daysSinceFloored < 1
-        ? '🔁 Includes a piece worn very recently'
-        : `🔁 Includes a piece worn ${daysSinceFloored} day(s) ago`,
+        ? (tripStartMs ? '🔁 Already worn today on this trip' : '🔁 Includes a piece worn very recently')
+        : (tripStartMs ? `🔁 Worn ${daysSinceFloored} day(s) ago on this trip` : `🔁 Includes a piece worn ${daysSinceFloored} day(s) ago`),
     };
   }
 
@@ -1059,6 +1077,10 @@ class AIOutfitRecommendationService {
     this.contextEngine = new ContextualFeatureEngine();
     this.outfitScorer = new NeuralOutfitScorer();
     this.diversityEngine = new DiversityEngine(0.15);
+    // Phase 4: trip-mode gap threshold -- see step 7b/8 below in
+    // recommendOutfits(). Below this score, a packed-capsule match is
+    // treated as "closest available", not a genuine fit.
+    this.TRIP_GAP_SCORE_THRESHOLD = 0.45;
   }
 
   /**
@@ -1166,18 +1188,55 @@ class AIOutfitRecommendationService {
       const outfitCombinations = this._generateOutfitCombinations(candidateItems, context);
       console.log(`✓ Generated ${outfitCombinations.length} combinations`);
 
+      // ✅ STEP 7b: TRIP-MODE GAP HANDLING (Phase 4)
+      // On a trip, the packed capsule can genuinely have nothing that
+      // assembles into even a loose outfit for this occasion (e.g. an
+      // unplanned "let's go somewhere fancy" with only casual pieces
+      // packed). Previously this fell straight through to an empty
+      // `outfits: []`, which every caller (getTodayOutfit etc.) turns
+      // into a bare 404 -- silently useless. Surface the closest
+      // available compromise instead, and flag it as a gap rather than
+      // presenting it as a normal match.
+      let tripGap = null;
+      if (isOnTrip && outfitCombinations.length === 0) {
+        const fallback = this._buildBestAvailableFallbackOutfit(clothes);
+        if (fallback) {
+          outfitCombinations.push(fallback);
+          tripGap = {
+            reason: 'no_combination',
+            message: `Nothing you packed cleanly fits "${occasion}" -- here's the closest option from what you brought.`,
+          };
+        }
+      }
+
       // ✅ STEP 8: SCORE ALL COMBINATIONS
       console.log(`⚖️ Scoring outfits...`);
+      const tripStartDate = isOnTrip ? user.tripStartDate : null;
       const scoredOutfits = [];
-      
+
       for (const combo of outfitCombinations) {
-        const score = await this.outfitScorer.scoreOutfit(combo.items, context, userPreferences);
+        const score = await this.outfitScorer.scoreOutfit(combo.items, context, userPreferences, tripStartDate);
         scoredOutfits.push({
           ...combo,
           score,
         });
       }
       console.log(`✓ Scored ${scoredOutfits.length} outfits`);
+
+      // A gap can also be a *poor* fit rather than no fit at all -- best
+      // available score still low. TRIP_GAP_SCORE_THRESHOLD is
+      // deliberately generous (below it means "this isn't really a
+      // match, just the least-bad option"), not a quality bar for
+      // ordinary (non-trip) recommendations.
+      if (isOnTrip && !tripGap && scoredOutfits.length > 0) {
+        const bestScore = Math.max(...scoredOutfits.map((o) => o.score.totalScore));
+        if (bestScore < this.TRIP_GAP_SCORE_THRESHOLD) {
+          tripGap = {
+            reason: 'poor_fit',
+            message: `Best packed match for "${occasion}" is only a partial fit (${Math.round(bestScore * 100)}%) -- worth picking something up locally if this occasion matters.`,
+          };
+        }
+      }
 
       // ✅ STEP 9: APPLY DIVERSITY RANKING
       console.log(`🌈 Applying diversity ranking...`);
@@ -1243,6 +1302,11 @@ class AIOutfitRecommendationService {
           endDate: user.tripEndDate,
           daysRemaining: this._calculateDaysRemaining(user.tripEndDate)
         } : null,
+        // Phase 4: trip-mode gap handling -- null when packed items fit
+        // the request cleanly, otherwise the caller (and the user) get
+        // told this is a compromise rather than treating it as a normal
+        // confident match.
+        tripGap,
         metadata: {
           totalCombinations: outfitCombinations.length,
           wardrobeSize: clothes.length,
@@ -1360,6 +1424,53 @@ class AIOutfitRecommendationService {
 
     console.log(`[CombinationEngine] Generated ${combinations.length} combinations`);
     return combinations;
+  }
+
+  /**
+   * ✅ TRIP-MODE GAP FALLBACK (Phase 4)
+   * Builds one "closest available" outfit from whatever's packed when
+   * normal combination generation produced nothing at all -- prefers a
+   * dress, then a top+bottom pair, then whichever single category
+   * exists, and pads with footwear/outerwear if any is packed. Ignores
+   * occasion/weather fit entirely (that's the whole point -- this is the
+   * fallback for when nothing fits, not another scored option), so the
+   * caller always flags it as a gap rather than a real match.
+   */
+  _buildBestAvailableFallbackOutfit(items) {
+    const dresses = items.filter(i => i.type?.toLowerCase() === 'dress');
+    const tops = items.filter(i => ['shirt', 'tshirt', 'blouse', 'top', 'sweater'].includes(i.type?.toLowerCase()));
+    const bottoms = items.filter(i => ['pants', 'jeans', 'skirt', 'shorts', 'trousers'].includes(i.type?.toLowerCase()));
+    const shoes = items.filter(i => ['shoes', 'sneakers', 'boots', 'sandals', 'heels'].includes(i.type?.toLowerCase()));
+    const outerwear = items.filter(i => ['jacket', 'coat', 'blazer', 'cardigan'].includes(i.type?.toLowerCase()));
+
+    const chosen = [];
+    if (dresses.length > 0) {
+      chosen.push(dresses[0]);
+    } else if (tops.length > 0 && bottoms.length > 0) {
+      chosen.push(tops[0], bottoms[0]);
+    } else if (tops.length > 0) {
+      chosen.push(tops[0]);
+    } else if (bottoms.length > 0) {
+      chosen.push(bottoms[0]);
+    } else if (items.length > 0) {
+      chosen.push(items[0]); // nothing categorizable at all -- whatever's packed, so the user isn't told there's literally nothing
+    }
+
+    if (chosen.length === 0) return null;
+
+    // Guard against the same item getting added twice -- e.g. when
+    // nothing categorizable exists at all and the single packed item
+    // that filled `chosen` above also happens to be the only
+    // shoes/outerwear candidate.
+    const chosenIds = new Set(chosen.map((i) => i.id));
+    const firstUnchosen = (list) => list.find((i) => !chosenIds.has(i.id));
+
+    const shoePick = firstUnchosen(shoes);
+    if (shoePick) { chosen.push(shoePick); chosenIds.add(shoePick.id); }
+    const outerwearPick = firstUnchosen(outerwear);
+    if (outerwearPick) { chosen.push(outerwearPick); chosenIds.add(outerwearPick.id); }
+
+    return { items: chosen };
   }
 
   /**

@@ -32,14 +32,40 @@ const activitySlotSchema = Joi.object({
     occasion: Joi.string().trim().min(1),
 });
 
+// Phase 4 fix, found live while verifying the confidence-transparency
+// feature: Joi.string().isoDate() doesn't just validate the format, it
+// NORMALIZES the value to a full ISO 8601 timestamp -- "2026-09-20" in,
+// "2026-09-20T00:00:00.000Z" out. Every other date key in this codebase
+// (weatherData, the packing algorithm's weatherByDate lookup, the
+// forecast-accuracy job) is a plain YYYY-MM-DD string, so a validated
+// activity's date silently stopped matching its own trip's weather data
+// -- context.weather was always null for every packed day, which in
+// turn meant weather-based packing scoring, needsOuterwear, and the new
+// confidence hedge never actually saw any weather at all. A plain
+// pattern check keeps the exact string the caller sent instead of
+// reformatting it.
+const isoDayPattern = /^\d{4}-\d{2}-\d{2}$/;
+const isoDaySchema = Joi.string().pattern(isoDayPattern).message('Date must be in YYYY-MM-DD format');
+
 const activitySchema = Joi.object({
-    date: Joi.string().isoDate(),
+    date: isoDaySchema,
     slots: Joi.array().items(activitySlotSchema),
+}).unknown(true);
+
+// Phase 4: optional multi-bag split (e.g. carry-on + checked bag)
+// alongside the existing single {type, maxItems} shape -- see
+// packaging.service.js's over-limit check, which sums maxItems across
+// bags when `bags` is present.
+const luggageBagSchema = Joi.object({
+    name: Joi.string().trim().max(50),
+    type: Joi.string().valid('carry-on', 'checked-luggage', 'backpack', 'personal-item', 'unlimited'),
+    maxItems: Joi.number().integer().min(1).max(100).required(),
 }).unknown(true);
 
 const luggageConstraintsSchema = Joi.object({
     type: Joi.string().valid('carry-on', 'checked-luggage', 'backpack', 'unlimited'),
     maxItems: Joi.number().integer().min(1).max(100),
+    bags: Joi.array().items(luggageBagSchema).min(1).max(10),
 }).unknown(true);
 
 const createTripBodySchema = Joi.object({
@@ -102,10 +128,19 @@ const regeneratePackingListBodySchema = Joi.object({
     luggageConstraints: luggageConstraintsSchema,
 });
 
+// Phase 4: single-day activity edit -- `slots` may be empty/omitted to
+// clear that day's plan entirely.
+const updateDayActivityBodySchema = Joi.object({
+    date: isoDaySchema.required()
+        .messages({ 'any.required': 'Date is required' }),
+    slots: Joi.array().items(activitySlotSchema).default([]),
+});
+
 module.exports = {
     validateCreateTrip: validate(createTripBodySchema, 'body'),
     validateUpdateTrip: [validate(tripIdParamSchema, 'params'), validate(updateTripBodySchema, 'body')],
     validateTripId: validate(tripIdParamSchema, 'params'),
     validateGetTrips: validate(getTripsQuerySchema, 'query'),
     validateRegeneratePackingList: [validate(tripIdParamSchema, 'params'), validate(regeneratePackingListBodySchema, 'body')],
+    validateUpdateDayActivity: [validate(tripIdParamSchema, 'params'), validate(updateDayActivityBodySchema, 'body')],
 };

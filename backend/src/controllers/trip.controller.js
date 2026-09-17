@@ -271,6 +271,43 @@ class TripController {
     }
   }
 
+  /**
+   * ✅ UPDATE A SINGLE DAY'S ACTIVITIES (Phase 4)
+   * @route PATCH /api/trips/:tripId/activities
+   * @body  { date: "2025-01-16", slots: [{ time, occasion }] } -- omit/empty slots to clear that day
+   */
+  static async updateDayActivity(req, res, next) {
+    try {
+      const userId = req.user.userId;
+      const { tripId } = req.params;
+      const { date, slots } = req.body;
+
+      const result = await tripService.updateDayActivity(userId, tripId, date, slots);
+
+      res.status(200).json({
+        success: true,
+        message: result.message,
+        data: {
+          packingList: result.packingList
+        }
+      });
+
+    } catch (error) {
+      if (error.message === 'Trip not found') {
+        return res.status(404).json({ success: false, message: error.message });
+      }
+      if (error.message?.includes("outside this trip's range")) {
+        return res.status(400).json({ success: false, message: error.message });
+      }
+      logger.error('Update day activity error', {
+        error: error.message,
+        userId: req.user?.userId,
+        tripId: req.params?.tripId
+      });
+      next(error);
+    }
+  }
+
   // To be impemented if  neccesary
   
     // /**
