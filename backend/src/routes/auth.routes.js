@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router();
+const Joi = require('joi');
 
 const authController = require('../controllers/auth.controller');
 const { authenticate } = require('../middleware/auth');
+const { validate } = require('../middleware/validators');
 const {
   validateRegister,
   validateLogin,
@@ -10,6 +12,10 @@ const {
   validateProfileUpdate,
   validateOAuth,
 } = require('../middleware/validators');
+
+const subscriptionSchema = Joi.object({
+  tier: Joi.string().valid('free', 'plus', 'pro').required(),
+});
 
 /**
  * @route   POST /api/v1/auth/register
@@ -54,6 +60,15 @@ router.get('/profile', authenticate, authController.getProfile);
  * @access  Private
  */
 router.put('/profile', authenticate, validateProfileUpdate, authController.updateProfile);
+
+/**
+ * @route   PATCH /api/v1/auth/me/subscription
+ * @desc    Phase 8 (PRD §7) -- set the caller's subscription tier.
+ *          Stub: no billing/payment integration exists yet, see
+ *          auth.controller.js#updateSubscription.
+ * @access  Private
+ */
+router.patch('/me/subscription', authenticate, validate(subscriptionSchema), authController.updateSubscription);
 
 /**
  * @route   POST /api/v1/auth/change-password

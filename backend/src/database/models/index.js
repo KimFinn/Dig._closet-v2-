@@ -133,8 +133,21 @@ const User = sequelize.define('User', {
         allowNull: true,
         field: 'trip_destination',
         comment: 'Current trip destination for context'
+    },
+
+    // Phase 8 (PRD §7/§3.9): free | plus | pro. No billing integration
+    // yet -- see migration 20260924000004-add-subscription-tier-to-users
+    // for why this is a stub, set manually via PATCH /auth/me/subscription
+    // rather than a payment webhook, exactly like every other
+    // credential-gated integration in this app.
+    subscriptionTier: {
+        type: DataTypes.STRING(20),
+        allowNull: false,
+        defaultValue: 'free',
+        field: 'subscription_tier',
+        validate: { isIn: { args: [['free', 'plus', 'pro']] } }
     }
-    
+
 }, {
     tableName: 'users',
     timestamps: true,
@@ -1249,9 +1262,105 @@ const TripParticipant = sequelize.define('TripParticipant', {
     },
     name: { type: DataTypes.STRING(255) },
     email: { type: DataTypes.STRING(255) },
-    role: { type: DataTypes.STRING(50), defaultValue: 'companion' }
+    role: { type: DataTypes.STRING(50), defaultValue: 'companion' },
+    // Phase 8 (PRD §3.9): invited | accepted | declined. Every Phase 8
+    // participant is required to have a real account (2026-09-17
+    // scoping decision) -- userId is set at invite time via an email
+    // lookup, not left null pending a guest signup.
+    status: {
+        type: DataTypes.STRING(20),
+        defaultValue: 'invited',
+        validate: { isIn: { args: [['invited', 'accepted', 'declined']] } }
+    }
 }, {
     tableName: 'trip_participants'
+});
+
+// Phase 8 (PRD §3.9): cross-closet borrowing consent -- explicit,
+// mutual, revocable, scoped by the owner's choice. Kept as three
+// genuinely distinct scopes per the 2026-09-17 scoping decision.
+const ClosetShare = sequelize.define('ClosetShare', {
+    id: {
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
+        primaryKey: true
+    },
+    ownerUserId: {
+        type: DataTypes.UUID,
+        allowNull: false,
+        field: 'owner_user_id',
+        references: { model: 'users', key: 'id' }
+    },
+    recipientUserId: {
+        type: DataTypes.UUID,
+        allowNull: false,
+        field: 'recipient_user_id',
+        references: { model: 'users', key: 'id' }
+    },
+    scope: {
+        type: DataTypes.STRING(20),
+        allowNull: false,
+        validate: { isIn: { args: [['event_only', 'trip_only', 'full_wardrobe']] } }
+    },
+    scopedTripId: {
+        type: DataTypes.UUID,
+        allowNull: true,
+        field: 'scoped_trip_id',
+        references: { model: 'trips', key: 'id' }
+    },
+    scopedActivityId: {
+        type: DataTypes.UUID,
+        allowNull: true,
+        field: 'scoped_activity_id',
+        references: { model: 'trip_activities', key: 'id' }
+    },
+    status: {
+        type: DataTypes.STRING(20),
+        defaultValue: 'pending',
+        validate: { isIn: { args: [['pending', 'active', 'revoked']] } }
+    }
+}, {
+    tableName: 'closet_shares'
+});
+
+// Phase 8 (PRD §3.9): a coordinated or cross-closet-borrowed outfit for
+// one shared trip activity. Trip- and activity-scoped for this phase
+// (2026-09-17 scoping decision) -- the bare event_ref/no-trip case is
+// deferred.
+const GroupOutfit = sequelize.define('GroupOutfit', {
+    id: {
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
+        primaryKey: true
+    },
+    tripId: {
+        type: DataTypes.UUID,
+        allowNull: false,
+        field: 'trip_id',
+        references: { model: 'trips', key: 'id' }
+    },
+    activityId: {
+        type: DataTypes.UUID,
+        allowNull: false,
+        field: 'activity_id',
+        references: { model: 'trip_activities', key: 'id' }
+    },
+    mode: {
+        type: DataTypes.STRING(20),
+        allowNull: false,
+        validate: { isIn: { args: [['coordinated', 'cross_closet']] } }
+    },
+    theme: { type: DataTypes.JSONB, allowNull: true },
+    participantOutfits: { type: DataTypes.JSONB, defaultValue: [], field: 'participant_outfits' },
+    items: { type: DataTypes.JSONB, defaultValue: [] },
+    createdBy: {
+        type: DataTypes.UUID,
+        allowNull: false,
+        field: 'created_by',
+        references: { model: 'users', key: 'id' }
+    }
+}, {
+    tableName: 'group_outfits'
 });
 
 // Phase 3: forecast-accuracy tracking -- see migration
@@ -2155,6 +2264,26 @@ BudgetReminder.belongsTo(Trip, {foreignKey: 'trip_id'});
 Outing.hasMany(BudgetReminder, {foreignKey: 'outing_id'});
 BudgetReminder.belongsTo(Outing, {foreignKey: 'outing_id'});
 
+// Phase 8
+User.hasMany(TripParticipant, {foreignKey: 'user_id'});
+TripParticipant.belongsTo(User, {foreignKey: 'user_id'});
+
+User.hasMany(ClosetShare, {foreignKey: 'owner_user_id', as: 'closetSharesOwned'});
+ClosetShare.belongsTo(User, {foreignKey: 'owner_user_id', as: 'owner'});
+User.hasMany(ClosetShare, {foreignKey: 'recipient_user_id', as: 'closetSharesReceived'});
+ClosetShare.belongsTo(User, {foreignKey: 'recipient_user_id', as: 'recipient'});
+Trip.hasMany(ClosetShare, {foreignKey: 'scoped_trip_id'});
+ClosetShare.belongsTo(Trip, {foreignKey: 'scoped_trip_id'});
+TripActivity.hasMany(ClosetShare, {foreignKey: 'scoped_activity_id'});
+ClosetShare.belongsTo(TripActivity, {foreignKey: 'scoped_activity_id'});
+
+Trip.hasMany(GroupOutfit, {foreignKey: 'trip_id'});
+GroupOutfit.belongsTo(Trip, {foreignKey: 'trip_id'});
+TripActivity.hasMany(GroupOutfit, {foreignKey: 'activity_id'});
+GroupOutfit.belongsTo(TripActivity, {foreignKey: 'activity_id'});
+User.hasMany(GroupOutfit, {foreignKey: 'created_by'});
+GroupOutfit.belongsTo(User, {foreignKey: 'created_by'});
+
 
 module.exports = {
     sequelize,
@@ -2179,5 +2308,7 @@ module.exports = {
     DestinationCulture,
     DestinationAdvisory,
     DestinationCostTier,
-    BudgetReminder
+    BudgetReminder,
+    ClosetShare,
+    GroupOutfit
 };

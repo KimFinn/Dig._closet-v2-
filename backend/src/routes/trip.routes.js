@@ -12,6 +12,8 @@ const {
 } = require('../middleware/trip.validation');
 // Phase 7 (PRD §3.8) -- TripActivity full logic, mounted below.
 const tripActivityRoutes = require('./tripActivity.routes');
+// Phase 8 (PRD §3.9) -- group trip membership, mounted below.
+const tripParticipantRoutes = require('./tripParticipant.routes');
 
 
 /**
@@ -242,5 +244,8 @@ router.get(
 
 // Phase 7 (PRD §3.8) -- /api/v1/trip/:tripId/activities/*
 router.use('/:tripId/activities', tripActivityRoutes);
+
+// Phase 8 (PRD §3.9) -- /api/v1/trip/:tripId/participants/*
+router.use('/:tripId/participants', tripParticipantRoutes);
 
 module.exports = router;

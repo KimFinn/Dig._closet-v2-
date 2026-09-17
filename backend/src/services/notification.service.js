@@ -198,12 +198,102 @@ function budgetReminderEmail(user, reminder) {
   };
 }
 
+/**
+ * Phase 8 (PRD §3.9): sent to an invitee (who already has an account --
+ * every Phase 8 participant is required to, see tripParticipant.service.js)
+ * when a trip owner invites them.
+ */
+function tripInviteEmail(invitee, trip, participant) {
+  const appLink = FRONTEND_URL || '#';
+  const firstName = (invitee.fullName || '').split(' ')[0] || 'there';
+  const destination = trip.destination || 'a trip';
+  return {
+    subject: `You've been invited to a trip to ${destination}`,
+    html: `
+      <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Hi ${firstName},</h2>
+        <p>You've been invited to join a trip to <strong>${destination}</strong> as a ${participant.role}.</p>
+        <p><a href="${appLink}" style="display:inline-block;padding:10px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">View invite</a></p>
+        <p style="color:#888;font-size:12px;margin-top:24px;">
+          You're getting this because someone invited you to a shared trip.
+        </p>
+      </div>
+    `,
+  };
+}
+
+/** Phase 8: lets the trip owner know whether an invite was accepted or declined. */
+function tripInviteRespondedEmail(tripOwner, participant, decision) {
+  const appLink = FRONTEND_URL || '#';
+  const firstName = (tripOwner.fullName || '').split(' ')[0] || 'there';
+  const verb = decision === 'accepted' ? 'accepted' : 'declined';
+  return {
+    subject: `${participant.name || participant.email} ${verb} your trip invite`,
+    html: `
+      <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Hi ${firstName},</h2>
+        <p><strong>${participant.name || participant.email}</strong> ${verb} your invite to join the trip.</p>
+        <p><a href="${appLink}" style="display:inline-block;padding:10px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">View trip</a></p>
+      </div>
+    `,
+  };
+}
+
+/**
+ * Phase 8 (PRD §3.9): a `ClosetShare` invite -- explicit consent
+ * request to view/borrow-from someone's wardrobe, scoped as the owner
+ * chose. Deliberately spells the scope out in plain language, since
+ * "what exactly am I agreeing to" matters more here than in almost any
+ * other email this app sends.
+ */
+function closetShareInviteEmail(recipient, owner, share) {
+  const appLink = FRONTEND_URL || '#';
+  const firstName = (recipient.fullName || '').split(' ')[0] || 'there';
+  const scopeLabel = {
+    event_only: 'for one specific activity',
+    trip_only: 'for one specific trip',
+    full_wardrobe: "for their full wardrobe, ongoing",
+  }[share.scope] || share.scope;
+  return {
+    subject: `${owner.fullName || 'A friend'} wants to share their closet with you`,
+    html: `
+      <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Hi ${firstName},</h2>
+        <p><strong>${owner.fullName || owner.email}</strong> wants to let you borrow from their wardrobe <strong>${scopeLabel}</strong>.</p>
+        <p>You can accept or decline, and either of you can revoke this at any time.</p>
+        <p><a href="${appLink}" style="display:inline-block;padding:10px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">Review request</a></p>
+      </div>
+    `,
+  };
+}
+
+/** Phase 8: notifies the other side of a ClosetShare accept/revoke. */
+function closetShareStatusEmail(toUser, otherUser, share, event) {
+  const appLink = FRONTEND_URL || '#';
+  const firstName = (toUser.fullName || '').split(' ')[0] || 'there';
+  const label = { accepted: 'accepted', revoked: 'ended' }[event] || event;
+  return {
+    subject: `${otherUser.fullName || 'A friend'} ${label} your closet-sharing connection`,
+    html: `
+      <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Hi ${firstName},</h2>
+        <p><strong>${otherUser.fullName || otherUser.email}</strong> ${label} the closet-sharing connection between you.</p>
+        <p><a href="${appLink}" style="display:inline-block;padding:10px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">Open app</a></p>
+      </div>
+    `,
+  };
+}
+
 module.exports = {
   sendNotification,
   dailyCheckInEmail,
   tripReplanEmail,
   gapPurchaseCheckInEmail,
   budgetReminderEmail,
+  tripInviteEmail,
+  tripInviteRespondedEmail,
+  closetShareInviteEmail,
+  closetShareStatusEmail,
   // exported for tests / direct use if ever needed
   sendEmail,
   sendPush,

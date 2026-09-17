@@ -196,7 +196,7 @@ class AuthController {
       const userId = req.user.userId;
 
       const user = await User.findByPk(userId, {
-        attributes: ['id', 'email', 'fullName', 'createdAt', 'lastLogin', 'isActive'],
+        attributes: ['id', 'email', 'fullName', 'createdAt', 'lastLogin', 'isActive', 'subscriptionTier'],
       });
 
       if (!user) {
@@ -256,6 +256,41 @@ class AuthController {
       });
     } catch (error) {
       logger.error('Update profile error:', error);
+      next(error);
+    }
+  }
+
+  /**
+   * Phase 8 (PRD §7): set the caller's subscription tier. There is no
+   * billing/payment integration anywhere in this codebase yet (Stripe
+   * or similar is future work) -- this is a manual stand-in for a
+   * payment webhook, in the same spirit as every other credential-gated
+   * integration in this app: fully buildable/testable now, wired to
+   * real billing later. Self-service on purpose (no admin role exists
+   * yet either) -- do not treat this as a real payment flow.
+   */
+  async updateSubscription(req, res, next) {
+    try {
+      const userId = req.user.userId;
+      const { tier } = req.body;
+
+      const user = await User.findByPk(userId);
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'User not found' });
+      }
+
+      user.subscriptionTier = tier;
+      await user.save();
+
+      logger.info('Subscription tier updated (stub — no billing integration)', { userId, tier });
+
+      res.json({
+        success: true,
+        message: 'Subscription tier updated',
+        data: { user: { id: user.id, subscriptionTier: user.subscriptionTier } },
+      });
+    } catch (error) {
+      logger.error('Update subscription error:', error);
       next(error);
     }
   }

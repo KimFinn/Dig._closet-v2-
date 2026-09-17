@@ -13,6 +13,9 @@ const gapPurchaseRoutes = require('./gapPurchase.routes');
 const outingRoutes = require('./outing.routes');
 const destinationRoutes = require('./destination.routes');
 const budgetRoutes = require('./budget.routes');
+// Phase 8 (Group Trips & Hybrid Group Outfits)
+const closetShareRoutes = require('./closetShare.routes');
+const participantInviteRoutes = require('./participantInvite.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -25,6 +28,8 @@ router.use('/gap-recommendations', gapPurchaseRoutes);
 router.use('/outing', outingRoutes);
 router.use('/destination', destinationRoutes);
 router.use('/budget', budgetRoutes);
+router.use('/closet-shares', closetShareRoutes);
+router.use('/invites', participantInviteRoutes);
 
 // API info endpoint
 router.get('/', (req, res) => {
