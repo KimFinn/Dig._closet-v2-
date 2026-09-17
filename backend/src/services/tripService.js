@@ -64,6 +64,9 @@ class TripService {
         budget: validatedData.budget,
         accommodation: validatedData.accommodation,
         transportation: validatedData.transportation,
+        planningMode: validatedData.planningMode,
+        totalBudget: validatedData.totalBudget,
+        budgetCurrency: validatedData.budgetCurrency,
         weatherSummary: weatherResult.summary,
         weatherData: weatherResult.dailyWeather,
         packingList: packingListResult,
@@ -495,7 +498,12 @@ class TripService {
       accommodation: data.accommodation,
       transportation: data.transportation,
       notes: data.notes,
-      companions: data.companions ? parseInt(data.companions) : 1
+      companions: data.companions ? parseInt(data.companions) : 1,
+      // Phase 7 (PRD §3.8/§3.15) -- see trip.validation.js's comment on
+      // the same fields for why these need to be threaded through here.
+      planningMode: data.planningMode || null,
+      totalBudget: data.totalBudget != null ? parseFloat(data.totalBudget) : null,
+      budgetCurrency: data.budgetCurrency || (data.totalBudget != null ? 'USD' : null)
     };
   }
 

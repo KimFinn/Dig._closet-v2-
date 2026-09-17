@@ -100,6 +100,20 @@ const createTripBodySchema = Joi.object({
         .messages({ 'string.max': 'Notes too long (max 2000 characters)' }),
     activities: Joi.array().items(activitySchema),
     luggageConstraints: luggageConstraintsSchema,
+    // Phase 7 (PRD §3.8/§3.15) -- these three columns existed on the
+    // Trip model since the Phase 7 migration, but nothing ever let a
+    // caller actually set them: this schema stripped them (stripUnknown)
+    // before they reached the controller/service, so budgetFeasibility/
+    // budgetTracker had a totalBudget/budgetCurrency to read but no API
+    // path ever wrote one. Found while live-verifying the shared replan
+    // capability (Task 7) -- fixed here rather than worked around in a
+    // test script, since it silently broke the whole budgeting feature.
+    planningMode: Joi.string().valid('mode_a', 'mode_b')
+        .messages({ 'any.only': 'planningMode must be "mode_a" or "mode_b"' }),
+    totalBudget: Joi.number().min(0)
+        .messages({ 'number.min': 'totalBudget must be a positive number' }),
+    budgetCurrency: Joi.string().length(3).uppercase()
+        .messages({ 'string.length': 'budgetCurrency must be a 3-letter ISO code, e.g. USD' }),
 });
 
 const updateTripBodySchema = Joi.object({
@@ -115,6 +129,13 @@ const updateTripBodySchema = Joi.object({
     status: Joi.string().valid('upcoming', 'active', 'completed', 'cancelled')
         .messages({ 'any.only': 'Invalid trip status' }),
     notes: Joi.string().trim().max(2000).messages({ 'string.max': 'Notes too long (max 2000 characters)' }),
+    // Phase 7 -- see createTripBodySchema's comment on the same fields.
+    planningMode: Joi.string().valid('mode_a', 'mode_b')
+        .messages({ 'any.only': 'planningMode must be "mode_a" or "mode_b"' }),
+    totalBudget: Joi.number().min(0)
+        .messages({ 'number.min': 'totalBudget must be a positive number' }),
+    budgetCurrency: Joi.string().length(3).uppercase()
+        .messages({ 'string.length': 'budgetCurrency must be a 3-letter ISO code, e.g. USD' }),
 });
 
 const getTripsQuerySchema = Joi.object({

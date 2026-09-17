@@ -28,6 +28,10 @@ const { scheduleDailyCheckIn } = require('./queues/checkInQueue');
 const { scheduleTripMaintenance } = require('./queues/tripMaintenanceQueue');
 const { scheduleGapPurchaseFollowup } = require('./queues/gapPurchaseFollowupQueue');
 const { scheduleProductFeedIngestion } = require('./queues/productFeedIngestionQueue');
+const { scheduleDestinationAdvisoryIngestion } = require('./queues/destinationAdvisoryQueue');
+const { scheduleBudgetReminderDispatch } = require('./queues/budgetReminderQueue');
+const { seedDestinationCulture } = require('./services/destinationCulture.service');
+const { seedDestinationCostTiers } = require('./services/destinationCostTier.service');
 
 // ============================================================================
 // CORS ORIGIN ALLOWLIST
@@ -209,6 +213,22 @@ async function startServer() {
         // registration pattern as the calls above -- see
         // src/queues/productFeedIngestionQueue.js.
         await scheduleProductFeedIngestion();
+
+        // Phase 7: register the daily destination advisory ingestion job
+        // (PRD §3.15) -- FCDO -> Canada -> Smartraveller fallback chain,
+        // scoped to countries with an active/upcoming trip. See
+        // src/queues/destinationAdvisoryQueue.js.
+        await scheduleDestinationAdvisoryIngestion();
+
+        // Phase 7: register the hourly budget-reminder dispatch job
+        // (PRD §3.15). See src/queues/budgetReminderQueue.js.
+        await scheduleBudgetReminderDispatch();
+
+        // Phase 7: idempotent curated-culture seed (PRD §3.15) -- only
+        // fills in rows that don't exist yet, never overwrites a
+        // manually-edited one. See destinationCulture.service.js.
+        await seedDestinationCulture();
+        await seedDestinationCostTiers();
 
         //Start the server
         server.listen(PORT,HOST,() => {

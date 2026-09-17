@@ -37,6 +37,8 @@ const { checkInQueue, processDailyCheckIn } = require('../queues/checkInQueue');
 const { tripMaintenanceQueue, processTripMaintenance } = require('../queues/tripMaintenanceQueue');
 const { gapPurchaseFollowupQueue, processGapPurchaseFollowup } = require('../queues/gapPurchaseFollowupQueue');
 const { productFeedIngestionQueue, processProductFeedIngestion } = require('../queues/productFeedIngestionQueue');
+const { destinationAdvisoryQueue, processDestinationAdvisoryIngestion } = require('../queues/destinationAdvisoryQueue');
+const { budgetReminderQueue, processBudgetReminderDispatch } = require('../queues/budgetReminderQueue');
 const { aiOutfitService } = require('../services/AIOutfit recommendation');
 
 const CONCURRENCY = parseInt(process.env.TAGGING_WORKER_CONCURRENCY || '3', 10);
@@ -298,6 +300,28 @@ productFeedIngestionQueue.process('product-feed-ingestion-run', 1, async (job) =
 
 logger.info('Product feed ingestion processor started');
 
+// ============================================================================
+// Phase 7: destination advisory ingestion (PRD §3.15)
+// ============================================================================
+
+destinationAdvisoryQueue.process('destination-advisory-ingestion-run', 1, async (job) => {
+  logger.info('Destination advisory ingestion run starting', { jobId: job.id });
+  return await processDestinationAdvisoryIngestion();
+});
+
+logger.info('Destination advisory ingestion processor started');
+
+// ============================================================================
+// Phase 7: budget reminder dispatch (PRD §3.15)
+// ============================================================================
+
+budgetReminderQueue.process('budget-reminder-dispatch-run', 1, async (job) => {
+  logger.info('Budget reminder dispatch run starting', { jobId: job.id });
+  return await processBudgetReminderDispatch();
+});
+
+logger.info('Budget reminder dispatch processor started');
+
 process.on('SIGTERM', async () => {
   await taggingQueue.close();
   await preferenceLearningQueue.close();
@@ -305,6 +329,8 @@ process.on('SIGTERM', async () => {
   await tripMaintenanceQueue.close();
   await gapPurchaseFollowupQueue.close();
   await productFeedIngestionQueue.close();
+  await destinationAdvisoryQueue.close();
+  await budgetReminderQueue.close();
   process.exit(0);
 });
 process.on('SIGINT', async () => {
@@ -314,5 +340,7 @@ process.on('SIGINT', async () => {
   await tripMaintenanceQueue.close();
   await gapPurchaseFollowupQueue.close();
   await productFeedIngestionQueue.close();
+  await destinationAdvisoryQueue.close();
+  await budgetReminderQueue.close();
   process.exit(0);
 });

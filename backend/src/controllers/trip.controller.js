@@ -1,6 +1,9 @@
 const {tripService} = require('../services/tripService');
 const { RecommendationLog } = require('../database/models');
 const { getGapPurchaseSuggestion } = require('../services/gapPurchase.service');
+// Phase 7 (PRD §3.8) -- Mode A / Mode B trip-activity planning
+const { fillLeisureTime, suggestDestinations } = require('../services/tripPlanningMode.service');
+const { getTripBudgetSummary } = require('../services/budgetTracker.service');
 const logger = require('../utils/logger');
 // Phase 0 fix: validation is now handled entirely by the Joi middleware
 // in trip.validation.js (applied in trip.routes.js) — request bodies/
@@ -493,6 +496,52 @@ class TripController {
         userId: req.user?.userId,
         tripId: req.params?.tripId,
       });
+      next(error);
+    }
+  }
+
+  /**
+   * Mode A -- fills open leisure slots on an existing trip with real
+   * Places-backed suggestions.
+   * @route POST /api/v1/trip/:tripId/fill-leisure-time
+   */
+  static async fillLeisureTime(req, res, next) {
+    try {
+      const result = await fillLeisureTime(req.user.userId, req.params.tripId, req.body || {});
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      logger.error('Mode A fill-leisure-time error', { error: error.message, userId: req.user?.userId, tripId: req.params?.tripId });
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
+      next(error);
+    }
+  }
+
+  /**
+   * Mode B -- suggests candidate destinations against loose criteria
+   * (no trip exists yet -- this is BEFORE a destination is chosen).
+   * @route POST /api/v1/trip/suggest-destinations
+   */
+  static async suggestDestinations(req, res, next) {
+    try {
+      const result = await suggestDestinations(req.user.userId, req.body || {});
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      logger.error('Mode B suggest-destinations error', { error: error.message, userId: req.user?.userId });
+      next(error);
+    }
+  }
+
+  /**
+   * Live per-category budget tracker -- Phase 7 (PRD §3.15).
+   * @route GET /api/v1/trip/:tripId/budget
+   */
+  static async getBudgetSummary(req, res, next) {
+    try {
+      const result = await getTripBudgetSummary(req.user.userId, req.params.tripId);
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      logger.error('Get trip budget summary error', { error: error.message, userId: req.user?.userId, tripId: req.params?.tripId });
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
       next(error);
     }
   }

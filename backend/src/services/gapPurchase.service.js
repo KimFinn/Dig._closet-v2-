@@ -22,6 +22,7 @@
 const { RecommendationLog } = require('../database/models');
 const { generateSearchResultsLink, generateProductLink, DISCLOSURE_TEXT } = require('./affiliateLink.service');
 const { findMatchingProduct, buildMatchEnvelope } = require('./productMatching.service');
+const { findNearbyForCategory } = require('./places.service');
 const logger = require('../utils/logger');
 
 const FUNNEL_STAGE_ORDER = ['suggested', 'clicked', 'purchased', 'worn'];
@@ -53,11 +54,48 @@ async function getGapPurchaseSuggestion(userId, recommendationLogId) {
   }
 
   if (row.urgency === 'too_urgent') {
+    // Phase 7 (PRD §3.8) -- the nearby-store carryover deliberately
+    // deferred from Phase 5: shipping can't make it in time, but a real
+    // local-store option is a different kind of answer with no shipping
+    // constraint. Surfaced ALONGSIDE the packed-outfit compromise below,
+    // never replacing it -- if no suitable nearby store exists (or the
+    // lookup itself fails), that compromise is still the honest fallback.
+    // This never claims a confirmed purchase the way the shipped-item
+    // flow does -- same "unconfirmed, here's a pointer" framing already
+    // used for Phase 5's cross-region product match.
+    let nearbyStores = null;
+    const category = row.gapDetails && row.gapDetails.category;
+    if (category) {
+      try {
+        const { results, live } = await findNearbyForCategory(category, row.region, { count: 3 });
+        if (results.length > 0) {
+          nearbyStores = {
+            places: results.map((r) => ({
+              placeId: r.placeId,
+              name: r.name,
+              formattedAddress: r.formattedAddress,
+              rating: r.rating,
+            })),
+            live,
+            message: "There isn't enough time left for standard shipping, but here's somewhere nearby that might have it -- worth calling ahead to confirm before you go.",
+          };
+        }
+      } catch (error) {
+        // Never let a Places failure block the too-urgent response --
+        // the packed-outfit compromise below is still a complete answer
+        // on its own.
+        logger.warn('Nearby-store lookup failed, falling back to packed-outfit compromise only', {
+          recommendationLogId, category, error: error.message,
+        });
+      }
+    }
+
     return {
       id: row.id,
       purchaseAvailable: false,
       reason: 'too_urgent',
       message: "There isn't enough time left for standard shipping to arrive before this is needed. See today's recommendation for the best option from what you already packed.",
+      nearbyStores,
       gapDetails: row.gapDetails,
     };
   }

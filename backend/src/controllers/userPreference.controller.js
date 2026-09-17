@@ -51,7 +51,13 @@ class UserPreferencesController {
                 
                 // Additional
                 notes,
-                notificationPreferences
+                notificationPreferences,
+
+                // Phase 7 (PRD §3.8) -- travel interest profile, feeding
+                // Mode A/B trip-activity planning.
+                cuisinePreferences,
+                activityCategories,
+                pacePreference
             } = req.body;
 
             // Check if preferences already exist
@@ -85,7 +91,10 @@ class UserPreferencesController {
                     ageRange: ageRange?.trim(),
                     gender: gender?.trim(),
                     notes: notes?.trim(),
-                    notificationPreferences: notificationPreferences || preferences.notificationPreferences
+                    notificationPreferences: notificationPreferences || preferences.notificationPreferences,
+                    cuisinePreferences: cuisinePreferences || preferences.cuisinePreferences,
+                    activityCategories: activityCategories || preferences.activityCategories,
+                    pacePreference: pacePreference?.trim() || preferences.pacePreference
                 });
 
                 logger.info('User preferences updated', {
@@ -129,7 +138,10 @@ class UserPreferencesController {
                         outfitSuggestions: true,
                         weatherAlerts: true,
                         tripReminders: true
-                    }
+                    },
+                    cuisinePreferences: cuisinePreferences || [],
+                    activityCategories: activityCategories || [],
+                    pacePreference: pacePreference?.trim()
                 });
 
                 logger.info('User preferences created', {
@@ -208,7 +220,8 @@ class UserPreferencesController {
                 'body',
                 'lifestyle',
                 'shopping',
-                'notifications'
+                'notifications',
+                'travel'
             ];
 
             if (!validSections.includes(section)) {
@@ -269,6 +282,16 @@ class UserPreferencesController {
 
                 case 'notifications':
                     if (req.body.notificationPreferences) updates.notificationPreferences = req.body.notificationPreferences;
+                    break;
+
+                // Phase 7 (PRD §3.8) -- travel interest profile (distinct
+                // from 'lifestyle', which is about outfits/wardrobe, not
+                // itinerary shape). Feeds Mode A (fillLeisureTime) / Mode
+                // B (suggestDestinations).
+                case 'travel':
+                    if (req.body.cuisinePreferences) updates.cuisinePreferences = req.body.cuisinePreferences;
+                    if (req.body.activityCategories) updates.activityCategories = req.body.activityCategories;
+                    if (req.body.pacePreference) updates.pacePreference = req.body.pacePreference.trim();
                     break;
             }
 

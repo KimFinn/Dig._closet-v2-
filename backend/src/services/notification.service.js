@@ -107,8 +107,14 @@ function dailyCheckInEmail(user) {
  * generated that it auto-regenerated the list. `changes` is an array of
  * { date, oldTemp, newTemp, oldCondition, newCondition } for the days
  * that actually drifted (not every day of the trip).
+ *
+ * `budgetSummary` (Phase 7, PRD §6.1 step 7) is optional -- the fresh
+ * read from the shared replan (tripReplan.service.js) that also runs
+ * whenever this email is sent. Only rendered when it exists and the
+ * trip actually has a budget set, so a trip with no budget configured
+ * doesn't get a confusing empty section.
  */
-function tripReplanEmail(user, trip, changes) {
+function tripReplanEmail(user, trip, changes, budgetSummary = null) {
   const appLink = FRONTEND_URL || '#';
   const firstName = (user.fullName || '').split(' ')[0] || 'there';
   const destination = trip.destination || 'your trip';
@@ -120,13 +126,18 @@ function tripReplanEmail(user, trip, changes) {
     })
     .join('');
 
+  const budgetNote = budgetSummary && budgetSummary.hasBudget
+    ? `<p style="color:#555;">Budget check: ${budgetSummary.message}</p>`
+    : '';
+
   return {
     subject: `Forecast changed for ${destination} — your packing list was updated`,
     html: `
       <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 0 auto;">
         <h2>Hi ${firstName},</h2>
-        <p>The forecast for <strong>${destination}</strong> shifted enough that we regenerated your packing list:</p>
+        <p>The forecast for <strong>${destination}</strong> shifted enough that we regenerated your packing list, and updated any planned activity outfits for those days:</p>
         <ul>${changeRows}</ul>
+        ${budgetNote}
         <p><a href="${appLink}" style="display:inline-block;padding:10px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">Review updated packing list</a></p>
         <p style="color:#888;font-size:12px;margin-top:24px;">
           You're getting this because you have an upcoming or active trip with packing recommendations enabled.
@@ -163,11 +174,36 @@ function gapPurchaseCheckInEmail(user, gapDetails) {
   };
 }
 
+/**
+ * Phase 7: "remind me to buy X while there" (PRD §3.15). Reuses this
+ * same notification pipeline rather than a new mechanism -- fired by
+ * budgetReminder.service.js once the reminder's trigger condition is
+ * met (trip/outing now active, or a specific date reached).
+ */
+function budgetReminderEmail(user, reminder) {
+  const appLink = FRONTEND_URL || '#';
+  const firstName = (user.fullName || '').split(' ')[0] || 'there';
+  return {
+    subject: `Reminder: ${reminder.itemDescription}`,
+    html: `
+      <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Hi ${firstName},</h2>
+        <p>You asked to be reminded: <strong>${reminder.itemDescription}</strong></p>
+        <p><a href="${appLink}" style="display:inline-block;padding:10px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">Open your trip</a></p>
+        <p style="color:#888;font-size:12px;margin-top:24px;">
+          You're getting this because you set a reminder for this trip/outing.
+        </p>
+      </div>
+    `,
+  };
+}
+
 module.exports = {
   sendNotification,
   dailyCheckInEmail,
   tripReplanEmail,
   gapPurchaseCheckInEmail,
+  budgetReminderEmail,
   // exported for tests / direct use if ever needed
   sendEmail,
   sendPush,

@@ -52,6 +52,14 @@ const { tripService } = require('../services/tripService');
 const WeatherService = require('../services/weather.service');
 const { getHistoricalWeatherForDate } = require('../services/historicalWeather.service');
 const { sendNotification, tripReplanEmail } = require('../services/notification.service');
+// Phase 7 (PRD §6.1 step 7) -- shared replan capability. A forecast
+// drift doesn't just mean the packing list is stale: any TripActivity
+// on one of the drifted dates may now have the wrong outfit linked
+// (e.g. planned for dry weather, forecast now says rain), so the same
+// drifted-dates list that triggers the packing-list regen below also
+// re-flows those activities' outfits + a fresh budget read, through the
+// one shared capability rather than a second parallel implementation.
+const { replanTripForDates } = require('../services/tripReplan.service');
 
 const redisConnection = {
   host: process.env.REDIS_CLOUD_HOST || 'localhost',
@@ -192,9 +200,25 @@ async function runAutoReplanPass() {
       const result = await tripService.regeneratePackingList(trip.userId, trip.id, {});
       replanned += 1;
 
+      // Shared replan (PRD §6.1 step 7): re-flow this trip's activities
+      // and budget for exactly the dates that drifted, alongside the
+      // packing list. Best-effort -- a replan hiccup here shouldn't
+      // undo the packing-list regen that already succeeded above.
+      let sharedReplan = null;
+      try {
+        sharedReplan = await replanTripForDates(trip.userId, trip.id, {
+          dates: changes.map((c) => c.date),
+          trigger: 'weather_drift',
+        });
+      } catch (error) {
+        logger.warn('Shared replan (activities/budget) failed after packing-list regen, continuing', {
+          tripId: trip.id, error: error.message,
+        });
+      }
+
       const user = await User.findByPk(trip.userId, { attributes: ['id', 'email', 'fullName'] });
       if (user) {
-        const { subject, html } = tripReplanEmail(user, trip, changes);
+        const { subject, html } = tripReplanEmail(user, trip, changes, sharedReplan?.budgetSummary || null);
         const sendResult = await sendNotification(user, { subject, html });
         if (!sendResult.sent && sendResult.reason !== 'no_api_key') {
           logger.warn('Trip replan email failed', { tripId: trip.id, userId: trip.userId, reason: sendResult.reason });
@@ -205,6 +229,8 @@ async function runAutoReplanPass() {
         tripId: trip.id,
         userId: trip.userId,
         totalItems: result.packingList?.tripWardrobe?.totalItems ?? 0,
+        activitiesReplanned: sharedReplan?.activitiesReplanned?.length ?? 0,
+        activitiesFailed: sharedReplan?.activitiesFailed?.length ?? 0,
       });
     } catch (error) {
       failed += 1;

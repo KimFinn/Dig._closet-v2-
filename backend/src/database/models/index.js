@@ -1118,6 +1118,21 @@ const Trip = sequelize.define('Trip', {
         field: 'luggage_constraints',
         defaultValue: null,
         comment: 'e.g. {type, maxItems} or {bags: [{name, type, maxItems}]}'
+    },
+    // Phase 7 (Trip Activities & Places, PRD §3.8)
+    planningMode: {
+        type: DataTypes.STRING(20),
+        field: 'planning_mode',
+        validate: { isIn: { args: [['mode_a', 'mode_b', null]] } },
+        comment: 'mode_a (destination-anchored) | mode_b (open-ended leisure) -- null for trips not using activity planning'
+    },
+    totalBudget: {
+        type: DataTypes.DECIMAL(10, 2),
+        field: 'total_budget'
+    },
+    budgetCurrency: {
+        type: DataTypes.STRING(3),
+        field: 'budget_currency'
     }
 }, {
     tableName: 'trips',
@@ -1190,7 +1205,26 @@ const TripActivity = sequelize.define('TripActivity', {
     timeSlot: { type: DataTypes.STRING(50), field: 'time_slot' },
     occasion: { type: DataTypes.STRING(100) },
     title: { type: DataTypes.STRING(255) },
-    notes: { type: DataTypes.TEXT }
+    notes: { type: DataTypes.TEXT },
+    // Phase 7 additions (PRD §3.8) -- activates this from schema-only
+    // into a real entity. trips.activities (JSONB) remains the input
+    // spec the packing algorithm reads; these rows are the richer,
+    // queryable object Places/budget/outfit-linking attach to.
+    category: { type: DataTypes.STRING(50) },
+    placeId: { type: DataTypes.STRING(255), field: 'place_id' },
+    locationText: { type: DataTypes.STRING(255), field: 'location_text' },
+    estimatedCost: { type: DataTypes.DECIMAL(10, 2), field: 'estimated_cost' },
+    categoryBudgetTag: {
+        type: DataTypes.STRING(50),
+        field: 'category_budget_tag',
+        validate: { isIn: { args: [['accommodation', 'food', 'activities', null]] } }
+    },
+    linkedOutfitId: { type: DataTypes.UUID, field: 'linked_outfit_id' },
+    status: {
+        type: DataTypes.STRING(20),
+        defaultValue: 'planned',
+        validate: { isIn: { args: [['planned', 'confirmed', 'skipped', 'replaced']] } }
+    }
 }, {
     tableName: 'trip_activities'
 });
@@ -1394,6 +1428,25 @@ const UserPreferences = sequelize.define('UserPreferences', {
     homeRegion: {
         type: DataTypes.STRING(100),
         field: 'home_region',
+    },
+    // Phase 7 (Trip Activities & Places, PRD §3.8) -- travel-specific
+    // interest profile feeding Mode A/B planning. Distinct from the
+    // style preferences above: related but separate signal (itinerary
+    // shape, not outfit choice).
+    cuisinePreferences: {
+        type: DataTypes.JSONB,
+        field: 'cuisine_preferences',
+        defaultValue: []
+    },
+    activityCategories: {
+        type: DataTypes.JSONB,
+        field: 'activity_categories',
+        defaultValue: []
+    },
+    pacePreference: {
+        type: DataTypes.STRING(20),
+        field: 'pace_preference',
+        validate: { isIn: { args: [['packed', 'relaxed', 'balanced', null]] } }
     },
     // Lifestyle
     climate: {
@@ -1969,6 +2022,118 @@ Clothes.hasOne(ClothesAttributes, {foreignKey: 'clothes_id'});
 User.hasOne(LearnedPreferences, {foreignKey: 'user_id'});
 LearnedPreferences.belongsTo(User, {foreignKey: 'user_id'});
 
+// Phase 7 (Trip Activities, Places, Destination Intelligence & Budgeting,
+// PRD §3.8/§3.15) -- new models. See feature-roadmap-tracker.md Phase 7.
+
+const Outing = sequelize.define('Outing', {
+    id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+    userId: { type: DataTypes.UUID, allowNull: false, field: 'user_id' },
+    title: { type: DataTypes.STRING(255), allowNull: false },
+    date: { type: DataTypes.DATEONLY, allowNull: false },
+    timeSlot: { type: DataTypes.STRING(50), field: 'time_slot' },
+    occasion: { type: DataTypes.STRING(100) },
+    category: { type: DataTypes.STRING(50) },
+    placeId: { type: DataTypes.STRING(255), field: 'place_id' },
+    locationText: { type: DataTypes.STRING(255), field: 'location_text' },
+    budgetAmount: { type: DataTypes.DECIMAL(10, 2), field: 'budget_amount' },
+    budgetCurrency: { type: DataTypes.STRING(3), field: 'budget_currency' },
+    linkedOutfitId: { type: DataTypes.UUID, field: 'linked_outfit_id' },
+    status: {
+        type: DataTypes.STRING(20),
+        defaultValue: 'planned',
+        validate: { isIn: { args: [['planned', 'completed', 'skipped']] } }
+    }
+}, {
+    tableName: 'outings'
+});
+
+// The PERMANENT, ToS-compliant slice of the Places cache -- place_id +
+// coordinates only. See migration 20260923000001-create-place-cache and
+// places.service.js for the compliance rationale.
+const PlaceCache = sequelize.define('PlaceCache', {
+    id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+    placeId: { type: DataTypes.STRING(255), allowNull: false, unique: true, field: 'place_id' },
+    latitude: { type: DataTypes.DECIMAL(9, 6) },
+    longitude: { type: DataTypes.DECIMAL(9, 6) },
+    queryKey: { type: DataTypes.STRING(255), field: 'query_key' },
+    firstSeenAt: { type: DataTypes.DATE, field: 'first_seen_at', defaultValue: DataTypes.NOW }
+}, {
+    tableName: 'place_cache'
+});
+
+const DestinationCulture = sequelize.define('DestinationCulture', {
+    id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+    country: { type: DataTypes.STRING(100), allowNull: false, unique: true },
+    summary: { type: DataTypes.TEXT },
+    nativeToForeignerNotes: { type: DataTypes.TEXT, field: 'native_to_foreigner_notes' },
+    lastUpdated: { type: DataTypes.DATE, field: 'last_updated' }
+}, {
+    tableName: 'destination_culture'
+});
+
+// Ingested from the FCDO -> Canada -> Smartraveller fallback chain --
+// see destinationAdvisory.service.js. No LLM anywhere in that pipeline.
+const DestinationAdvisory = sequelize.define('DestinationAdvisory', {
+    id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+    country: { type: DataTypes.STRING(100), allowNull: false, unique: true },
+    source: {
+        type: DataTypes.STRING(20),
+        allowNull: false,
+        validate: { isIn: { args: [['fcdo', 'canada', 'smartraveller']] } }
+    },
+    riskLevel: { type: DataTypes.STRING(20), field: 'risk_level' },
+    summary: { type: DataTypes.TEXT },
+    categories: { type: DataTypes.JSONB },
+    sourceUrl: { type: DataTypes.TEXT, field: 'source_url' },
+    fetchedAt: { type: DataTypes.DATE, allowNull: false, field: 'fetched_at' }
+}, {
+    tableName: 'destination_advisories'
+});
+
+// Curated cost-of-living table backing the budget feasibility check --
+// own data, not Numbeo's paid API. See budgetFeasibility.service.js.
+const DestinationCostTier = sequelize.define('DestinationCostTier', {
+    id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+    countryOrRegion: { type: DataTypes.STRING(100), allowNull: false, field: 'country_or_region' },
+    tier: {
+        type: DataTypes.STRING(20),
+        allowNull: false,
+        validate: { isIn: { args: [['budget', 'mid', 'comfortable']] } }
+    },
+    dailyAccommodation: { type: DataTypes.DECIMAL(10, 2), field: 'daily_accommodation' },
+    dailyFood: { type: DataTypes.DECIMAL(10, 2), field: 'daily_food' },
+    dailyLocalTransport: { type: DataTypes.DECIMAL(10, 2), field: 'daily_local_transport' },
+    dailyActivities: { type: DataTypes.DECIMAL(10, 2), field: 'daily_activities' },
+    currency: { type: DataTypes.STRING(3), allowNull: false, defaultValue: 'USD' },
+    sourceNote: { type: DataTypes.STRING(255), field: 'source_note' },
+    lastUpdated: { type: DataTypes.DATE, field: 'last_updated' }
+}, {
+    tableName: 'destination_cost_tiers'
+});
+
+const BudgetReminder = sequelize.define('BudgetReminder', {
+    id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+    userId: { type: DataTypes.UUID, allowNull: false, field: 'user_id' },
+    tripId: { type: DataTypes.UUID, field: 'trip_id' },
+    outingId: { type: DataTypes.UUID, field: 'outing_id' },
+    itemDescription: { type: DataTypes.STRING(255), allowNull: false, field: 'item_description' },
+    triggerType: {
+        type: DataTypes.STRING(20),
+        defaultValue: 'trip_active',
+        field: 'trigger_type',
+        validate: { isIn: { args: [['trip_active', 'specific_date']] } }
+    },
+    triggerDate: { type: DataTypes.DATEONLY, field: 'trigger_date' },
+    status: {
+        type: DataTypes.STRING(20),
+        defaultValue: 'pending',
+        validate: { isIn: { args: [['pending', 'sent', 'dismissed']] } }
+    },
+    sentAt: { type: DataTypes.DATE, field: 'sent_at' }
+}, {
+    tableName: 'budget_reminders'
+});
+
 // Phase 3
 Trip.hasMany(TripActivity, {foreignKey: 'trip_id'});
 TripActivity.belongsTo(Trip, {foreignKey: 'trip_id'});
@@ -1978,6 +2143,17 @@ TripParticipant.belongsTo(Trip, {foreignKey: 'trip_id'});
 
 Trip.hasMany(WeatherOutcome, {foreignKey: 'trip_id'});
 WeatherOutcome.belongsTo(Trip, {foreignKey: 'trip_id'});
+
+// Phase 7
+User.hasMany(Outing, {foreignKey: 'user_id'});
+Outing.belongsTo(User, {foreignKey: 'user_id'});
+
+User.hasMany(BudgetReminder, {foreignKey: 'user_id'});
+BudgetReminder.belongsTo(User, {foreignKey: 'user_id'});
+Trip.hasMany(BudgetReminder, {foreignKey: 'trip_id'});
+BudgetReminder.belongsTo(Trip, {foreignKey: 'trip_id'});
+Outing.hasMany(BudgetReminder, {foreignKey: 'outing_id'});
+BudgetReminder.belongsTo(Outing, {foreignKey: 'outing_id'});
 
 
 module.exports = {
@@ -1997,5 +2173,11 @@ module.exports = {
     TripParticipant,
     WeatherOutcome,
     HistoricalWeatherRecord,
-    ProductFeedItem
+    ProductFeedItem,
+    Outing,
+    PlaceCache,
+    DestinationCulture,
+    DestinationAdvisory,
+    DestinationCostTier,
+    BudgetReminder
 };

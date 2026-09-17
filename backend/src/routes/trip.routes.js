@@ -10,6 +10,8 @@ const {
   validateRegeneratePackingList,
   validateUpdateDayActivity
 } = require('../middleware/trip.validation');
+// Phase 7 (PRD §3.8) -- TripActivity full logic, mounted below.
+const tripActivityRoutes = require('./tripActivity.routes');
 
 
 /**
@@ -69,6 +71,21 @@ router.get('/active',
 );
 
 /**
+ * @route   POST /api/v1/trip/suggest-destinations
+ * @desc    Phase 7 Mode B -- open-ended leisure planning, no destination
+ *          chosen yet. Body: { vibe?: 'warm'|'cold'|'mild', month?: 1-12,
+ *          interests?: string[] } (interests falls back to the user's
+ *          own activityCategories preference when omitted).
+ * @access  Private
+ * @note    Registered BEFORE the /:tripId routes below -- otherwise
+ *          Express would match "suggest-destinations" as a :tripId.
+ */
+router.post('/suggest-destinations',
+    authenticate,
+    TripController.suggestDestinations
+);
+
+/**
  * @route   GET /api/trips/:id
  * @desc    Get a single trip by ID
  * @access  Private
@@ -78,6 +95,29 @@ router.get(
     authenticate,
     validateTripId,
     TripController.getTripById
+);
+
+/**
+ * @route   POST /api/v1/trip/:tripId/fill-leisure-time
+ * @desc    Phase 7 Mode A -- fills open leisure slots on an existing
+ *          trip with real Places-backed suggestions.
+ * @access  Private
+ */
+router.post('/:tripId/fill-leisure-time',
+    authenticate,
+    validateTripId,
+    TripController.fillLeisureTime
+);
+
+/**
+ * @route   GET /api/v1/trip/:tripId/budget
+ * @desc    Phase 7 -- live per-category budget tracker.
+ * @access  Private
+ */
+router.get('/:tripId/budget',
+    authenticate,
+    validateTripId,
+    TripController.getBudgetSummary
 );
 
 /**
@@ -199,5 +239,8 @@ router.get(
 //     TripController.getUpcomingTrips
 // );
 
+
+// Phase 7 (PRD §3.8) -- /api/v1/trip/:tripId/activities/*
+router.use('/:tripId/activities', tripActivityRoutes);
 
 module.exports = router;

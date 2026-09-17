@@ -80,6 +80,23 @@ const preferencesBodySchema = Joi.object({
     sizes: Joi.object().unknown(true),
     activities: Joi.array().items(Joi.string()),
     notificationPreferences: Joi.object().unknown(true),
+
+    // Phase 7 (PRD §3.8) -- travel interest profile feeding Mode A
+    // (fillLeisureTime) / Mode B (suggestDestinations). These columns
+    // existed on UserPreferences since the Phase 7 migration, but this
+    // schema was never updated for them, so `stripUnknown: true` was
+    // silently dropping them before they ever reached the controller --
+    // meaning there was no way to actually set them via the API at all.
+    // Found live while building the Task 7 comprehensive E2E test (Mode
+    // A's real Places-backed path never ran because activityCategories
+    // could never be set); fixed here the same way the equivalent trip
+    // budget-field gap was fixed.
+    cuisinePreferences: Joi.array().items(Joi.string())
+        .messages({ 'array.base': 'Cuisine preferences must be an array' }),
+    activityCategories: Joi.array().items(Joi.string())
+        .messages({ 'array.base': 'Activity categories must be an array' }),
+    pacePreference: Joi.string().trim().valid('packed', 'relaxed', 'balanced')
+        .messages({ 'any.only': 'pacePreference must be "packed", "relaxed", or "balanced"' }),
 });
 
 module.exports = {

@@ -9,6 +9,10 @@ const tripRoutes = require('./trip.routes');
 const preferenceRoutes = require('./userPreference.routes');
 const notificationRoutes = require('./notification.routes');
 const gapPurchaseRoutes = require('./gapPurchase.routes');
+// Phase 7 (Trip Activities, Places, Destination Intelligence & Budgeting)
+const outingRoutes = require('./outing.routes');
+const destinationRoutes = require('./destination.routes');
+const budgetRoutes = require('./budget.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -18,6 +22,9 @@ router.use('/trip',tripRoutes);
 router.use("/UserPreference",preferenceRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/gap-recommendations', gapPurchaseRoutes);
+router.use('/outing', outingRoutes);
+router.use('/destination', destinationRoutes);
+router.use('/budget', budgetRoutes);
 
 // API info endpoint
 router.get('/', (req, res) => {
