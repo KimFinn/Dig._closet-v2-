@@ -154,6 +154,20 @@ router.post(
 );
 
 /**
+ * @route   PATCH /api/clothes/:itemId/correct-tags
+ * @desc    Manually correct AI-assigned tags (distinct from the generic
+ *          update above -- clears needsManualReview and logs the
+ *          correction as a UserInteraction('correct') learning signal)
+ * @access  Private
+ * @new     Phase 1: manual tag correction flow
+ */
+router.patch(
+    '/:itemId/correct-tags',
+    authenticate,
+    clothesController.correctClothingTags
+);
+
+/**
  * @route   DELETE /api/clothes/:itemId
  * @desc    Delete (soft or permanent) a clothing item
  * @access  Private

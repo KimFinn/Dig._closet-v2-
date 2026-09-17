@@ -1355,7 +1355,10 @@ const UserInteraction = sequelize.define('UserInteraction', {
         comment: 'Outfit that was interacted with'
     },
     action: {
-        type: DataTypes.ENUM('view', 'like', 'dislike', 'save', 'share', 'wear', 'skip'),
+        // Phase 1: 'correct' added for the manual tag-correction flow
+        // (see migration 20260917000001) -- a distinct learning signal
+        // from a like/save/wear, per the PRD.
+        type: DataTypes.ENUM('view', 'like', 'dislike', 'save', 'share', 'wear', 'skip', 'correct'),
         allowNull: false,
         comment: 'Type of interaction'
     },

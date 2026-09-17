@@ -17,7 +17,7 @@
  * @version 2.0.0
  */
 
-const { Clothes } = require('../database/models');
+const { Clothes, UserInteraction } = require('../database/models');
 const { Op } = require('sequelize'); 
 const logger = require('../utils/logger');
 const cloudinary = require('../configurations/cloudinary');
@@ -157,6 +157,21 @@ const validationSchemas = {
         notes: Joi.string().max(500).optional(),
         isActive: Joi.boolean().optional()
     }),
+
+    // Phase 1: manual tag correction -- only the AI-assigned taggable
+    // fields, deliberately narrower than updateClothing (no size/notes/
+    // purchasePrice/isActive here; those aren't tags and go through the
+    // regular update endpoint). At least one field required, since a
+    // correction with nothing to correct isn't a valid request.
+    correctTags: Joi.object({
+        type: Joi.string().max(50).optional(),
+        color: Joi.string().max(50).optional(),
+        pattern: Joi.string().max(50).optional(),
+        fabric: Joi.string().max(50).optional(),
+        season: Joi.string().max(50).optional(),
+        occasion: Joi.string().max(100).optional(),
+        brand: Joi.string().max(50).optional(),
+    }).min(1),
 
     getClothingItems: Joi.object({
         type: Joi.string().optional(),
@@ -718,6 +733,116 @@ class ClothesController {
     }
 
     /**
+     * Manually correct AI-assigned tags on a clothing item
+     * @route PATCH /api/clothes/:itemId/correct-tags
+     *
+     * Phase 1: distinct from the generic updateClothingItem above on
+     * purpose. The PRD calls a manual tag correction "itself a learning
+     * signal... signals the user's own taxonomy, not just fixing data" --
+     * a plain field edit doesn't capture that. This endpoint only accepts
+     * the AI-taggable fields, records exactly what changed (old value ->
+     * new value, per field) on the item's own aiMetadata history, clears
+     * needsManualReview since a human has now reviewed the tags, and logs
+     * a UserInteraction('correct') row so the future learning system can
+     * tell "the user fixed this tag" apart from every other interaction.
+     */
+    async correctClothingTags(req, res, next) {
+        try {
+            const { itemId } = req.params;
+            const userId = req.user.userId;
+
+            const { error, value } = validationSchemas.correctTags.validate(req.body);
+            if (error) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Validation error',
+                    errors: error.details.map(d => d.message)
+                });
+            }
+
+            const item = await Clothes.findByPk(itemId);
+            if (!item) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Clothing item not found'
+                });
+            }
+
+            if (item.userId !== userId) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'You do not have permission to update this item'
+                });
+            }
+
+            const taggableFields = ['type', 'color', 'pattern', 'fabric', 'season', 'occasion', 'brand'];
+            const corrections = [];
+            const updates = {};
+
+            for (const field of taggableFields) {
+                if (value[field] === undefined) continue;
+                const newValue = typeof value[field] === 'string' ? value[field].trim() : value[field];
+                const oldValue = item[field] ?? null;
+                if (newValue !== oldValue) {
+                    corrections.push({ field, oldValue, newValue });
+                    updates[field] = newValue;
+                }
+            }
+
+            if (corrections.length === 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'No tag changes provided -- values match the current tags'
+                });
+            }
+
+            const existingHistory = Array.isArray(item.aiMetadata?.correctionHistory)
+                ? item.aiMetadata.correctionHistory
+                : [];
+
+            updates.needsManualReview = false;
+            updates.aiMetadata = {
+                ...(item.aiMetadata || {}),
+                correctionHistory: [
+                    ...existingHistory,
+                    { correctedAt: new Date().toISOString(), corrections }
+                ]
+            };
+
+            await item.update(updates);
+
+            // The learning-system-facing copy of this same event -- kept
+            // separate from aiMetadata.correctionHistory above (which is
+            // per-item audit trail) since UserInteraction is the single
+            // cross-item event log Phase 2's learning job reads from.
+            await UserInteraction.create({
+                userId,
+                itemId: item.id,
+                action: 'correct',
+                context: { corrections }
+            });
+
+            await invalidateCache(`clothes:item:${itemId}`);
+            await invalidateCache(`clothes:user:${item.userId}:*`);
+
+            logger.info(`✅ Tags corrected for item ${itemId}:`, corrections.map(c => c.field));
+
+            res.status(200).json({
+                success: true,
+                message: 'Tags corrected successfully',
+                data: {
+                    clothingItem: item,
+                    corrections
+                }
+            });
+
+        } catch (error) {
+            logger.error('Error correcting clothing tags:', error);
+            next(error);
+        }
+    }
+
+    /**
      * Delete a clothing item (soft or permanent)
      * @route DELETE /api/clothes/:itemId
      * 
@@ -952,6 +1077,21 @@ class ClothesController {
             await item.increment('wearCount');
             await item.update({ lastWornAt: new Date() });
             await item.reload();
+
+            // Phase 1 fix: this endpoint updated wearCount/lastWornAt but
+            // never wrote a UserInteraction row, unlike the equivalent
+            // outfit-level wear endpoint (outfit.controller.js#wearOutfit).
+            // Item-level wear is exactly the kind of implicit behavioral
+            // signal §5 of the PRD lists as learning-system input, and the
+            // recency penalty in the recommendation engine (AIOutfit
+            // recommendation.js's _scoreRecency) reads lastWornAt directly
+            // -- but without this row, a solo item worn outside any
+            // outfit was invisible to the event log entirely.
+            await UserInteraction.create({
+                userId,
+                itemId: item.id,
+                action: 'wear',
+            });
 
             // Invalidate cache
             await invalidateCache(`clothes:item:${itemId}`);

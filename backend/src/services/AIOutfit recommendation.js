@@ -502,17 +502,73 @@ class NeuralOutfitScorer {
       versatility: 0.05,
     };
 
-    const totalScore = Object.entries(scores).reduce((sum, [key, score]) => {
+    const rawScore = Object.entries(scores).reduce((sum, [key, score]) => {
       return sum + (score * (weights[key] || 0));
     }, 0);
 
-    const reasoning = this._generateDetailedReasoning(scores, items, context);
+    // Phase 1 fix: "avoid repetitive suggestions" (PRD 3.3) -- applied as a
+    // multiplicative penalty on the final score rather than as an 11th
+    // weighted dimension, so it doesn't require re-normalizing the
+    // existing weights (which already sum to 1.0) or change what any
+    // individual breakdown score means. An outfit built from pieces worn
+    // in the last couple of days still shows up if it's genuinely the
+    // best match (nothing here hard-filters it out), it's just ranked
+    // below an equally-good fresher alternative.
+    const recency = this._scoreRecency(items);
+    const totalScore = Math.min(1.0, Math.max(0.0, rawScore)) * recency.factor;
+
+    const reasoning = this._generateDetailedReasoning(scores, items, context, recency);
 
     return {
-      totalScore: Math.min(1.0, Math.max(0.0, totalScore)),
+      totalScore,
+      rawScore: Math.min(1.0, Math.max(0.0, rawScore)),
       breakdown: scores,
+      recency,
       reasoning,
       confidence: this._calculateConfidence(scores),
+    };
+  }
+
+  /**
+   * Phase 1 fix: recency penalty feeding the "avoid recently worn" scoring
+   * adjustment above. Looks at each item's own `lastWornAt` (already
+   * tracked on Clothes) -- the freshest wear across the outfit's items
+   * determines the penalty, since a single very-recently-worn centerpiece
+   * (e.g. the same jacket) makes an outfit feel repetitive even if every
+   * other piece is new. No wear within the window -> no penalty at all.
+   */
+  _scoreRecency(items, windowDays = 2) {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+
+    const wornTimestamps = items
+      .map(item => item.lastWornAt ? new Date(item.lastWornAt).getTime() : null)
+      .filter(ts => ts !== null && !Number.isNaN(ts));
+
+    if (wornTimestamps.length === 0) {
+      return { factor: 1.0, daysSinceMostRecentWear: null, note: null };
+    }
+
+    const mostRecentWear = Math.max(...wornTimestamps);
+    const daysSince = (now - mostRecentWear) / DAY_MS;
+
+    if (daysSince >= windowDays) {
+      return { factor: 1.0, daysSinceMostRecentWear: Math.floor(daysSince), note: null };
+    }
+
+    // Linear ramp: worn moments ago -> factor floors at 0.4 (still
+    // suggestible if truly nothing else fits), worn right at the edge of
+    // the window -> factor 1.0 (no penalty).
+    const minFactor = 0.4;
+    const factor = minFactor + (1 - minFactor) * Math.max(0, daysSince / windowDays);
+    const daysSinceFloored = Math.max(0, Math.floor(daysSince));
+
+    return {
+      factor,
+      daysSinceMostRecentWear: daysSinceFloored,
+      note: daysSinceFloored < 1
+        ? '🔁 Includes a piece worn very recently'
+        : `🔁 Includes a piece worn ${daysSinceFloored} day(s) ago`,
     };
   }
 
@@ -705,7 +761,7 @@ class NeuralOutfitScorer {
     return Math.min(1.0, versatilityScore / items.length);
   }
 
-  _generateDetailedReasoning(scores, items, context) {
+  _generateDetailedReasoning(scores, items, context, recency = null) {
     const reasons = [];
 
     if (scores.colorHarmony > 0.85) reasons.push("✨ Excellent color harmony");
@@ -713,6 +769,7 @@ class NeuralOutfitScorer {
     if (scores.occasionFit > 0.85) reasons.push(`🎯 Perfect for ${context?.occasion?.type}`);
     if (scores.weatherAppropriate > 0.85) reasons.push("☀️ Weather-appropriate");
     if (scores.userAlignment > 0.80) reasons.push("💯 Matches your style");
+    if (recency?.note) reasons.push(recency.note);
 
     return reasons.length > 0 ? reasons.join(" • ") : "Balanced outfit";
   }

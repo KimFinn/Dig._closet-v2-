@@ -19,6 +19,7 @@
 
 const OutfitService = require("../services/outfitEngine");
 const OutfitRecommendationService = require("../services/AIOutfit recommendation");
+const WeatherService = require("../services/weather.service");
 const { Trip, UserInteraction, Outfit, OutfitRating } = require("../database/models");
 const logger = require('../utils/logger');
 // Phase 0 fix: express-validator's `validationResult` was imported here
@@ -35,6 +36,96 @@ const redis = require('redis');
 // ============================================================================
 
 let cacheClient = null;
+
+// ============================================================================
+// WEATHER-BASED DAILY RECOMMENDATION HELPERS
+// ============================================================================
+// Phase 1 fix: getTodayOutfit/getTomorrowOutfit/getCustomOutfit used to
+// call `OutfitRecommendationService.suggestDailyOutfit(...)` — a method
+// that has never existed anywhere in AIOutfit recommendation.js (the real
+// entry point is `recommendOutfits(userId, occasion, options)`, a
+// different signature entirely: positional occasion, and
+// `options.city`/`options.country` rather than a single `location`
+// string). Every call to any of the three recommendation endpoints threw
+// and 500'd. These helpers resolve the query-string `location` the same
+// way tripService.js already does ("City, Country" -> {city, country})
+// and turn it into the flat weather object the engine's context builder
+// expects, so the three controller methods below can call the real
+// method with the right shape.
+
+/**
+ * "City, Country" -> {city, country}; a bare "City" -> {city, country:
+ * null}. Matches tripService.js's _parseDestination exactly, so a
+ * `location` value that already works for trip creation works here too.
+ */
+function parseLocation(location) {
+    if (!location) return { city: null, country: null };
+    if (location.includes(',')) {
+        const [city, country] = location.split(',').map(s => s.trim());
+        return { city: city || null, country: country || null };
+    }
+    return { city: location.trim(), country: null };
+}
+
+/**
+ * WeatherService's forecast calls (getTomorrowWeather/getWeatherForDate)
+ * return a {summary, dailyForecasts} shape, not the flat {temp,
+ * condition, ...} shape getCurrentWeather returns and the engine's
+ * ContextualFeatureEngine.generateContextVector expects. This adapts a
+ * forecast summary into that flat shape. avgPrecipitation comes back as
+ * a 0-100 rain-probability percentage; the engine's own insight checks
+ * (e.g. `precipitation > 0.5`) assume a 0-1 fraction, so it's divided
+ * down here to match.
+ */
+function forecastSummaryToWeather(summary) {
+    if (!summary) return null;
+    return {
+        temp: summary.avgTemp,
+        feelsLike: summary.avgTemp,
+        condition: summary.dominantCondition,
+        humidity: summary.avgHumidity,
+        windSpeed: summary.avgWindSpeed,
+        precipitation: (summary.avgPrecipitation || 0) / 100,
+    };
+}
+
+/**
+ * Resolves weather for a recommendation request. Weather is optional
+ * everywhere downstream — the engine already treats a null `context.weather`
+ * as "skip weather-specific scoring/constraints" rather than failing — so
+ * anything that goes wrong here (no city given, no country given, since
+ * WeatherService requires both; no WEATHER_API_KEY configured; a network
+ * error) degrades to "no weather" instead of failing the whole
+ * recommendation request. This mirrors tripService.js's
+ * _fetchTripWeather fallback pattern exactly, rather than inventing a
+ * new convention.
+ */
+async function resolveWeatherForRecommendation(mode, location, date) {
+    const { city, country } = parseLocation(location);
+    if (!city || !country) {
+        if (location) {
+            logger.warn('Skipping weather for recommendation: need "City, Country" to look up weather', { location, mode });
+        }
+        return null;
+    }
+
+    try {
+        if (mode === 'tomorrow') {
+            const forecast = await WeatherService.getTomorrowWeather(city, country);
+            return forecastSummaryToWeather(forecast?.summary);
+        }
+        if (mode === 'custom' && date) {
+            const forecast = await WeatherService.getWeatherForDate(city, country, date);
+            return forecastSummaryToWeather(forecast?.summary);
+        }
+        return await WeatherService.getCurrentWeather(city, country);
+    } catch (error) {
+        logger.warn('Weather lookup failed for recommendation, continuing without it', {
+            mode, city, country, error: error.message
+        });
+        return null;
+    }
+}
 
 async function getCacheClient() {
     if (!cacheClient) {
@@ -901,17 +992,21 @@ class OutfitController {
                 location
             });
 
-            const suggestions = await OutfitRecommendationService.suggestDailyOutfit(userId, {
-                mode: "today",
-                activity: activity?.trim(),
-                location: location?.trim()
+            // Phase 1 fix: was calling suggestDailyOutfit(), which does
+            // not exist on this service (see the helpers above this
+            // class) -- every request here threw. recommendOutfits()
+            // is the real entry point.
+            const weather = await resolveWeatherForRecommendation('today', location?.trim());
+            const result = await OutfitRecommendationService.recommendOutfits(userId, activity?.trim(), {
+                weather,
             });
+            const suggestions = result.outfits;
 
             if (!suggestions || suggestions.length === 0) {
                 return res.status(404).json(
                     buildErrorResponse(
                         ERROR_CODES.OUTFIT_NOT_FOUND,
-                        'No outfit suggestions available for today'
+                        result.message || 'No outfit suggestions available for today'
                     )
                 );
             }
@@ -975,18 +1070,24 @@ class OutfitController {
                 location
             });
 
-            const suggestions = await OutfitRecommendationService.suggestDailyOutfit(userId, {
-                mode: "tomorrow",
-                activity: activity?.trim(),
-                trip,
-                location: location?.trim()
+            // Phase 1 fix: same suggestDailyOutfit() bug as getTodayOutfit
+            // -- fixed the same way. `trip` isn't passed to
+            // recommendOutfits (it has no such option; trip mode is
+            // auto-detected from the user's own activeTripId), but a
+            // trip's destination is a reasonable location fallback when
+            // the caller didn't pass one explicitly.
+            const effectiveLocation = location?.trim() || trip?.destination;
+            const weather = await resolveWeatherForRecommendation('tomorrow', effectiveLocation);
+            const result = await OutfitRecommendationService.recommendOutfits(userId, activity?.trim(), {
+                weather,
             });
+            const suggestions = result.outfits;
 
             if (!suggestions || suggestions.length === 0) {
                 return res.status(404).json(
                     buildErrorResponse(
                         ERROR_CODES.OUTFIT_NOT_FOUND,
-                        'No outfit suggestions available for tomorrow'
+                        result.message || 'No outfit suggestions available for tomorrow'
                     )
                 );
             }
@@ -1064,19 +1165,20 @@ class OutfitController {
                 tripId: tripId || null,
             });
 
-            const suggestions = await OutfitRecommendationService.suggestDailyOutfit(userId, {
-                mode: "custom",
-                date: new Date(date),
-                activity: activity.trim(),
-                trip,
-                location: location?.trim()
+            // Phase 1 fix: same suggestDailyOutfit() bug fixed the same
+            // way as getTodayOutfit/getTomorrowOutfit above.
+            const effectiveLocation = location?.trim() || trip?.destination;
+            const weather = await resolveWeatherForRecommendation('custom', effectiveLocation, new Date(date));
+            const result = await OutfitRecommendationService.recommendOutfits(userId, activity.trim(), {
+                weather,
             });
+            const suggestions = result.outfits;
 
             if (!suggestions || suggestions.length === 0) {
                 return res.status(404).json(
                     buildErrorResponse(
                         ERROR_CODES.OUTFIT_NOT_FOUND,
-                        'No outfit suggestions available for the specified date'
+                        result.message || 'No outfit suggestions available for the specified date'
                     )
                 );
             }
