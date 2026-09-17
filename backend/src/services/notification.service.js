@@ -101,9 +101,45 @@ function dailyCheckInEmail(user) {
   };
 }
 
+/**
+ * Phase 3: sent by queues/tripMaintenanceQueue.js when the forecast for
+ * an upcoming/active trip has drifted enough since the packing list was
+ * generated that it auto-regenerated the list. `changes` is an array of
+ * { date, oldTemp, newTemp, oldCondition, newCondition } for the days
+ * that actually drifted (not every day of the trip).
+ */
+function tripReplanEmail(user, trip, changes) {
+  const appLink = FRONTEND_URL || '#';
+  const firstName = (user.fullName || '').split(' ')[0] || 'there';
+  const destination = trip.destination || 'your trip';
+
+  const changeRows = (changes || [])
+    .map((c) => {
+      const dateLabel = new Date(c.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      return `<li>${dateLabel}: ${Math.round(c.oldTemp)}°C ${c.oldCondition} → ${Math.round(c.newTemp)}°C ${c.newCondition}</li>`;
+    })
+    .join('');
+
+  return {
+    subject: `Forecast changed for ${destination} — your packing list was updated`,
+    html: `
+      <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Hi ${firstName},</h2>
+        <p>The forecast for <strong>${destination}</strong> shifted enough that we regenerated your packing list:</p>
+        <ul>${changeRows}</ul>
+        <p><a href="${appLink}" style="display:inline-block;padding:10px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">Review updated packing list</a></p>
+        <p style="color:#888;font-size:12px;margin-top:24px;">
+          You're getting this because you have an upcoming or active trip with packing recommendations enabled.
+        </p>
+      </div>
+    `,
+  };
+}
+
 module.exports = {
   sendNotification,
   dailyCheckInEmail,
+  tripReplanEmail,
   // exported for tests / direct use if ever needed
   sendEmail,
   sendPush,

@@ -1,0 +1,164 @@
+/**
+ * Historical (actual, not forecast) weather — Phase 3, for
+ * WeatherOutcome forecast-accuracy tracking.
+ *
+ * Deliberately a separate provider from weather.service.js (OpenWeather,
+ * forecasts only). OpenWeather's historical/actuals data is a paid
+ * add-on; Open-Meteo (https://open-meteo.com) has a genuinely free
+ * Historical Weather API -- real recorded observations (ERA5
+ * reanalysis), no signup or API key, free for non-commercial use up to
+ * 10,000 calls/day. Checked live in September 2026, not assumed from
+ * training data. If this app goes commercial at a scale that matters,
+ * Open-Meteo has a paid tier for that -- but at "one lookup per active
+ * trip per day" volume, that's a long way off.
+ *
+ * Geocoding (city/country -> lat/lon, which the archive API needs
+ * instead of a place name) is also Open-Meteo's own free endpoint, and
+ * is Redis-cached with a long TTL -- a city's coordinates don't change,
+ * so there's no reason to re-resolve them on every call.
+ */
+
+// Uses the global `fetch` (Node 18+) rather than axios, deliberately --
+// no other reason than that it needs no extra dependency for two simple
+// GET calls.
+const redis = require('redis');
+const logger = require('../utils/logger');
+
+const GEOCODING_URL = 'https://geocoding-api.open-meteo.com/v1/search';
+const ARCHIVE_URL = 'https://archive-api.open-meteo.com/v1/archive';
+const GEOCODE_CACHE_TTL_SEC = 30 * 24 * 60 * 60; // 30 days -- coordinates don't change
+
+async function fetchWithTimeout(url, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} from ${new URL(url).hostname}`);
+    }
+    return response;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+let cacheClient = null;
+async function getCacheClient() {
+  if (!cacheClient) {
+    cacheClient = redis.createClient({
+      socket: {
+        host: process.env.REDIS_CLOUD_HOST || 'localhost',
+        port: parseInt(process.env.REDIS_CLOUD_PORT || '6379', 10),
+        tls: process.env.REDIS_TLS === 'true',
+        rejectUnauthorized: false,
+      },
+      password: process.env.REDIS_CLOUD_PASSWORD,
+    });
+    cacheClient.on('error', (err) => logger.warn('Historical-weather cache error', { message: err.message }));
+    await cacheClient.connect();
+  }
+  return cacheClient;
+}
+
+// WMO weather codes (what Open-Meteo returns) collapsed down to the
+// same small condition vocabulary weather.service.js already uses
+// (clear/clouds/rain/snow/thunderstorm/fog), so a WeatherOutcome row's
+// forecast_condition and actual_condition are directly comparable.
+function wmoCodeToCondition(code) {
+  if (code === 0) return 'clear';
+  if ([1, 2, 3].includes(code)) return 'clouds';
+  if ([45, 48].includes(code)) return 'fog';
+  if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return 'rain';
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return 'snow';
+  if ([95, 96, 99].includes(code)) return 'thunderstorm';
+  return 'unknown';
+}
+
+async function geocode(city, country) {
+  const cacheKey = `geocode:${city.toLowerCase()}:${(country || '').toLowerCase()}`;
+  try {
+    const cache = await getCacheClient();
+    const cached = await cache.get(cacheKey);
+    if (cached) return JSON.parse(cached);
+  } catch (error) {
+    logger.warn('Geocode cache read failed, continuing without cache', { message: error.message });
+  }
+
+  const url = `${GEOCODING_URL}?${new URLSearchParams({ name: city, count: 5, language: 'en', format: 'json' })}`;
+  const response = await fetchWithTimeout(url);
+  const data = await response.json();
+
+  const results = data?.results || [];
+  // Prefer a result whose country matches, when we have one to match
+  // against -- "Paris" alone is ambiguous (France vs Texas).
+  const match = (country && results.find((r) => r.country?.toLowerCase() === country.toLowerCase())) || results[0];
+
+  if (!match) {
+    throw new Error(`Could not geocode "${city}${country ? ', ' + country : ''}"`);
+  }
+
+  const coords = { latitude: match.latitude, longitude: match.longitude };
+
+  try {
+    const cache = await getCacheClient();
+    await cache.set(cacheKey, JSON.stringify(coords), { EX: GEOCODE_CACHE_TTL_SEC });
+  } catch (error) {
+    logger.warn('Geocode cache write failed', { message: error.message });
+  }
+
+  return coords;
+}
+
+/**
+ * @param {string} city
+ * @param {string} country
+ * @param {string} date - YYYY-MM-DD, must be in the past (this is
+ *   historical/actual data, not a forecast)
+ * @returns {Promise<{temp:number, condition:string, precipitation:number}|null>}
+ *   null if the date has no data yet (e.g. called for a date that
+ *   hasn't happened) or geocoding/the archive call failed -- callers
+ *   treat this as "skip this outcome check", never as a reason to fail
+ *   the job that called it.
+ */
+async function getHistoricalWeatherForDate(city, country, date) {
+  if (!city) return null;
+
+  try {
+    const { latitude, longitude } = await geocode(city, country);
+
+    const url = `${ARCHIVE_URL}?${new URLSearchParams({
+      latitude,
+      longitude,
+      start_date: date,
+      end_date: date,
+      daily: 'temperature_2m_mean,weathercode,precipitation_sum',
+      timezone: 'auto',
+    })}`;
+    const response = await fetchWithTimeout(url);
+    const data = await response.json();
+
+    const daily = data?.daily;
+    if (!daily || !daily.time || daily.time.length === 0) {
+      return null;
+    }
+
+    const temp = daily.temperature_2m_mean?.[0];
+    const code = daily.weathercode?.[0];
+    const precipitation = daily.precipitation_sum?.[0];
+
+    if (temp === null || temp === undefined) return null;
+
+    return {
+      temp,
+      condition: wmoCodeToCondition(code),
+      precipitation: precipitation || 0,
+    };
+  } catch (error) {
+    logger.warn('Historical weather lookup failed, skipping this outcome check', {
+      city, country, date, error: error.message,
+    });
+    return null;
+  }
+}
+
+module.exports = { getHistoricalWeatherForDate, wmoCodeToCondition };

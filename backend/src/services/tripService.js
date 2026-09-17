@@ -28,45 +28,23 @@ class TripService {
       
       // ✅ STEP 2: Parse destination
       const { city, country } = this._parseDestination(validatedData.destination);
-      
+
       // ✅ STEP 3: Calculate trip duration
       const durationDays = this._calculateDuration(validatedData.startDate, validatedData.endDate);
-      
-      // ✅ STEP 4: Fetch multi-day weather
-      logger.info('Fetching weather data', { city, country, days: durationDays });
-      const weatherResult = await this._fetchTripWeather(
-        city, 
-        country, 
-        validatedData.startDate, 
-        validatedData.endDate
-      );
 
-      // ✅ STEP 5: Parse activities per day
-      const activities = this._parseActivities(
-        tripData.activities,
-        validatedData.startDate,
-        durationDays
-      );
-
-      // ✅ STEP 6: Generate packing list (if activities provided)
-      let packingListResult = null;
-      if (activities.length > 0) {
-        logger.info('Generating packing list', { userId, activities: activities.length });
-        
-        packingListResult = await packagingService.generatePackingList({
-          userId,
-          dates: this._generateDateArray(validatedData.startDate, validatedData.endDate),
-          activities,
-          destination: validatedData.destination,
-          luggageConstraints: tripData.luggageConstraints || this._getDefaultLuggageConstraints(tripData.tripType),
-          weatherData: weatherResult.dailyWeather
-        });
-
-        logger.info('Packing list generated', { 
-          totalItems: packingListResult.tripWardrobe.totalItems,
-          outfits: packingListResult.dailyGuide.length 
-        });
-      }
+      // ✅ STEPS 4-6: Fetch weather, parse activities, generate packing
+      // list -- shared with regeneratePackingList() below, so both paths
+      // stay in sync instead of duplicating this logic.
+      const { weatherResult, activities, packingListResult } = await this._generateWeatherAndPackingList(userId, {
+        city,
+        country,
+        startDate: validatedData.startDate,
+        endDate: validatedData.endDate,
+        activitiesInput: tripData.activities,
+        luggageConstraints: tripData.luggageConstraints,
+        tripType: validatedData.tripType,
+        destination: validatedData.destination
+      });
 
       // ✅ STEP 7: Determine trip status
       const status = this._determineTripStatus(validatedData.startDate, validatedData.endDate);
@@ -121,6 +99,81 @@ class TripService {
       });
       throw error;
     }
+  }
+
+  /**
+   * ✅ REGENERATE PACKING LIST for an existing trip (Phase 3 fix)
+   *
+   * Previously this delegated to createTrip(), which always does a
+   * Trip.create() -- every "regenerate" call left the original trip row
+   * untouched and silently created a second, orphaned Trip record (never
+   * referenced by anything, never cleaned up), while also being liable to
+   * throw outright once the trip had already started, since
+   * _validateTripData()/_validateDates() reject any startDate that's in
+   * the past. This updates the existing row in place instead, matching
+   * what "regenerate" actually means.
+   *
+   * @param {string} userId
+   * @param {string} tripId
+   * @param {Object} overrides - optional { activities, luggageConstraints }
+   *   to use instead of the trip's stored values (e.g. the user edited
+   *   the itinerary before regenerating).
+   */
+  async regeneratePackingList(userId, tripId, overrides = {}) {
+    logger.info('Regenerating packing list', { userId, tripId });
+
+    const trip = await Trip.findOne({ where: { id: tripId, userId } });
+
+    if (!trip) {
+      throw new Error('Trip not found');
+    }
+
+    const { city, country } = this._parseDestination(trip.destination);
+
+    const { weatherResult, activities, packingListResult } = await this._generateWeatherAndPackingList(userId, {
+      city,
+      country,
+      startDate: trip.startDate,
+      endDate: trip.endDate,
+      activitiesInput: overrides.activities || trip.activities,
+      luggageConstraints: overrides.luggageConstraints,
+      tripType: trip.tripType,
+      destination: trip.destination
+    });
+
+    await trip.update({
+      weatherSummary: weatherResult.summary,
+      weatherData: weatherResult.dailyWeather,
+      packingList: packingListResult,
+      activities: activities.length > 0 ? activities : trip.activities
+    });
+
+    // If this trip is currently the user's active trip, refresh the
+    // packed-items list trip mode is using too -- otherwise a
+    // regenerate wouldn't actually change what recommendations draw from.
+    const user = await User.findByPk(userId);
+    if (user?.activeTripId === tripId && packingListResult) {
+      await this._activateTripMode(userId, tripId, packingListResult, {
+        startDate: trip.startDate,
+        endDate: trip.endDate,
+        destination: trip.destination
+      });
+    }
+
+    logger.info('Packing list regenerated successfully', {
+      userId,
+      tripId,
+      totalItems: packingListResult?.tripWardrobe?.totalItems ?? 0
+    });
+
+    return {
+      trip,
+      packingList: packingListResult,
+      weatherSummary: weatherResult.summary,
+      message: packingListResult
+        ? `Packing list regenerated with ${packingListResult.tripWardrobe.totalItems} items.`
+        : 'No activities to plan a packing list for -- add activities and regenerate again.'
+    };
   }
 
   /**
@@ -348,6 +401,42 @@ class TripService {
    */
   _calculateDuration(startDate, endDate) {
     return Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24));
+  }
+
+  /**
+   * Shared by createTrip() and regeneratePackingList(): fetch weather,
+   * parse activities, and generate the capsule packing list. Pulled out
+   * so both callers stay in sync instead of duplicating this sequence
+   * (regeneratePackingList used to just re-call createTrip(), which is
+   * what caused the duplicate-trip bug this was extracted to fix).
+   */
+  async _generateWeatherAndPackingList(userId, { city, country, startDate, endDate, activitiesInput, luggageConstraints, tripType, destination }) {
+    logger.info('Fetching weather data', { city, country, startDate, endDate });
+    const weatherResult = await this._fetchTripWeather(city, country, startDate, endDate);
+
+    const durationDays = this._calculateDuration(startDate, endDate);
+    const activities = this._parseActivities(activitiesInput, startDate, durationDays);
+
+    let packingListResult = null;
+    if (activities.length > 0) {
+      logger.info('Generating packing list', { userId, activities: activities.length });
+
+      packingListResult = await packagingService.generatePackingList({
+        userId,
+        dates: this._generateDateArray(startDate, endDate),
+        activities,
+        destination,
+        luggageConstraints: luggageConstraints || this._getDefaultLuggageConstraints(tripType),
+        weatherData: weatherResult.dailyWeather
+      });
+
+      logger.info('Packing list generated', {
+        totalItems: packingListResult.tripWardrobe.totalItems,
+        outfits: packingListResult.dailyGuide.length
+      });
+    }
+
+    return { weatherResult, activities, packingListResult };
   }
 
   /**

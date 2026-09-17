@@ -244,30 +244,18 @@ class TripController {
       const userId = req.user.userId;
       const { tripId } = req.params;
 
-      // Get trip
-      const trip = await tripService.getTripById(userId, tripId);
-
-      // Regenerate packing list with potentially updated activities
-      const newActivities = req.body.activities || trip.activities;
-      
-      const result = await tripService.createTrip(userId, {
-        destination: trip.destination,
-        startDate: trip.startDate,
-        endDate: trip.endDate,
-        purpose: trip.purpose,
-        tripType: trip.tripType,
-        activities: newActivities,
+      // Updates the existing trip row in place (weather + packing list
+      // recalculated) -- does NOT create a new trip. See
+      // tripService.regeneratePackingList() for why this used to
+      // silently create a duplicate, orphaned trip.
+      const result = await tripService.regeneratePackingList(userId, tripId, {
+        activities: req.body.activities,
         luggageConstraints: req.body.luggageConstraints
-      });
-
-      // Update trip with new packing list
-      await tripService.updateTrip(userId, tripId, {
-        packingList: result.packingList
       });
 
       res.status(200).json({
         success: true,
-        message: "Packing list regenerated successfully",
+        message: result.message,
         data: {
           packingList: result.packingList
         }

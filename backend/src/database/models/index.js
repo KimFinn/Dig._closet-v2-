@@ -1093,6 +1093,16 @@ const Trip = sequelize.define('Trip', {
             max: { args: [5] }
         },
         comment: 'User rating (0-5)'
+    },
+    activities: {
+        // Phase 3 fix: createTrip() has always parsed and used this, but
+        // the column never existed -- Sequelize silently dropped it on
+        // every .create() call. See migration
+        // 20260919000001-add-activities-to-trips.
+        type: DataTypes.JSONB,
+        allowNull: true,
+        defaultValue: [],
+        comment: 'Parsed day-by-day activities: [{date, slots: [{time, occasion}]}]'
     }
 }, {
     tableName: 'trips',
@@ -1144,6 +1154,89 @@ Trip.findUpcoming = function(userId, options = {}) {
         ...options
     });
 };
+
+// Phase 3: schema-only per the roadmap ("scaffolded — not used yet") --
+// no controller/service reads or writes these. trips.activities (JSONB,
+// above) remains the real source the packing algorithm and auto-replan
+// job read.
+const TripActivity = sequelize.define('TripActivity', {
+    id: {
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
+        primaryKey: true
+    },
+    tripId: {
+        type: DataTypes.UUID,
+        allowNull: false,
+        field: 'trip_id',
+        references: { model: 'trips', key: 'id' }
+    },
+    date: { type: DataTypes.DATEONLY, allowNull: false },
+    timeSlot: { type: DataTypes.STRING(50), field: 'time_slot' },
+    occasion: { type: DataTypes.STRING(100) },
+    title: { type: DataTypes.STRING(255) },
+    notes: { type: DataTypes.TEXT }
+}, {
+    tableName: 'trip_activities'
+});
+
+const TripParticipant = sequelize.define('TripParticipant', {
+    id: {
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
+        primaryKey: true
+    },
+    tripId: {
+        type: DataTypes.UUID,
+        allowNull: false,
+        field: 'trip_id',
+        references: { model: 'trips', key: 'id' }
+    },
+    userId: {
+        type: DataTypes.UUID,
+        allowNull: true,
+        field: 'user_id',
+        references: { model: 'users', key: 'id' }
+    },
+    name: { type: DataTypes.STRING(255) },
+    email: { type: DataTypes.STRING(255) },
+    role: { type: DataTypes.STRING(50), defaultValue: 'companion' }
+}, {
+    tableName: 'trip_participants'
+});
+
+// Phase 3: forecast-accuracy tracking -- see migration
+// 20260919000003-create-weather-outcomes for the full rationale.
+// Written by the nightly job in queues/tripMaintenanceQueue.js.
+const WeatherOutcome = sequelize.define('WeatherOutcome', {
+    id: {
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
+        primaryKey: true
+    },
+    tripId: {
+        type: DataTypes.UUID,
+        allowNull: false,
+        field: 'trip_id',
+        references: { model: 'trips', key: 'id' }
+    },
+    date: { type: DataTypes.DATEONLY, allowNull: false },
+    city: { type: DataTypes.STRING(100) },
+    country: { type: DataTypes.STRING(100) },
+    forecastTemp: { type: DataTypes.DECIMAL(5, 2), field: 'forecast_temp' },
+    forecastCondition: { type: DataTypes.STRING(50), field: 'forecast_condition' },
+    forecastPrecipitation: { type: DataTypes.DECIMAL(4, 3), field: 'forecast_precipitation' },
+    forecastType: { type: DataTypes.STRING(50), field: 'forecast_type' },
+    actualTemp: { type: DataTypes.DECIMAL(5, 2), field: 'actual_temp' },
+    actualCondition: { type: DataTypes.STRING(50), field: 'actual_condition' },
+    actualPrecipitation: { type: DataTypes.DECIMAL(4, 3), field: 'actual_precipitation' },
+    tempDelta: { type: DataTypes.DECIMAL(5, 2), field: 'temp_delta' },
+    conditionMatched: { type: DataTypes.BOOLEAN, field: 'condition_matched' },
+    source: { type: DataTypes.STRING(50), defaultValue: 'open-meteo' },
+    checkedAt: { type: DataTypes.DATE, field: 'checked_at' }
+}, {
+    tableName: 'weather_outcomes'
+});
 
 //User Preferences Model - UPDATED TO PRODUCTION-READY VERSION
 const UserPreferences = sequelize.define('UserPreferences', {
@@ -1674,6 +1767,16 @@ Clothes.hasOne(ClothesAttributes, {foreignKey: 'clothes_id'});
 User.hasOne(LearnedPreferences, {foreignKey: 'user_id'});
 LearnedPreferences.belongsTo(User, {foreignKey: 'user_id'});
 
+// Phase 3
+Trip.hasMany(TripActivity, {foreignKey: 'trip_id'});
+TripActivity.belongsTo(Trip, {foreignKey: 'trip_id'});
+
+Trip.hasMany(TripParticipant, {foreignKey: 'trip_id'});
+TripParticipant.belongsTo(Trip, {foreignKey: 'trip_id'});
+
+Trip.hasMany(WeatherOutcome, {foreignKey: 'trip_id'});
+WeatherOutcome.belongsTo(Trip, {foreignKey: 'trip_id'});
+
 
 module.exports = {
     sequelize,
@@ -1687,5 +1790,8 @@ module.exports = {
     ClothesAttributes,
     RecommendationLog,
     FashionTrends,
-    LearnedPreferences
+    LearnedPreferences,
+    TripActivity,
+    TripParticipant,
+    WeatherOutcome
 };

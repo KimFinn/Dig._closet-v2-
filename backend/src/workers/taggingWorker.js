@@ -31,6 +31,10 @@ const { MCPFashionTagger, MCPConfig, VisionProvider } = require('../services/fas
 // tagging for this process's resources.
 const { preferenceLearningQueue, ACTIVE_WINDOW_DAYS, NIGHTLY_CONCURRENCY } = require('../queues/preferenceLearningQueue');
 const { checkInQueue, processDailyCheckIn } = require('../queues/checkInQueue');
+// Phase 3: trip auto-replan + forecast-accuracy tracking. Same
+// one-process-for-now reasoning as the two queues above -- once/night,
+// DB + a couple of bounded external calls, not worth a dedicated process yet.
+const { tripMaintenanceQueue, processTripMaintenance } = require('../queues/tripMaintenanceQueue');
 const { aiOutfitService } = require('../services/AIOutfit recommendation');
 
 const CONCURRENCY = parseInt(process.env.TAGGING_WORKER_CONCURRENCY || '3', 10);
@@ -258,15 +262,28 @@ checkInQueue.process('daily-checkin-run', 1, async (job) => {
 
 logger.info('Daily check-in processor started');
 
+// ============================================================================
+// Phase 3: trip maintenance (auto-replan + forecast-accuracy tracking)
+// ============================================================================
+
+tripMaintenanceQueue.process('trip-maintenance-run', 1, async (job) => {
+  logger.info('Trip maintenance run starting', { jobId: job.id });
+  return await processTripMaintenance();
+});
+
+logger.info('Trip maintenance processor started');
+
 process.on('SIGTERM', async () => {
   await taggingQueue.close();
   await preferenceLearningQueue.close();
   await checkInQueue.close();
+  await tripMaintenanceQueue.close();
   process.exit(0);
 });
 process.on('SIGINT', async () => {
   await taggingQueue.close();
   await preferenceLearningQueue.close();
   await checkInQueue.close();
+  await tripMaintenanceQueue.close();
   process.exit(0);
 });

@@ -25,6 +25,7 @@ const {errorHandler,notFound} = require('./middleware/errorHandler');
 const { tripModeManager } = require('./services/tripModeManager.service');
 const { scheduleNightlyLearning } = require('./queues/preferenceLearningQueue');
 const { scheduleDailyCheckIn } = require('./queues/checkInQueue');
+const { scheduleTripMaintenance } = require('./queues/tripMaintenanceQueue');
 
 // ============================================================================
 // CORS ORIGIN ALLOWLIST
@@ -187,6 +188,12 @@ async function startServer() {
         // only registers when it should run.
         await scheduleNightlyLearning();
         await scheduleDailyCheckIn();
+
+        // Phase 3: register the nightly trip-maintenance job (auto-replan
+        // on forecast drift + forecast-accuracy backfill). Same
+        // idempotent-registration pattern as the two calls above -- see
+        // src/queues/tripMaintenanceQueue.js.
+        await scheduleTripMaintenance();
 
         //Start the server
         server.listen(PORT,HOST,() => {
