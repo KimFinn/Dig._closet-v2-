@@ -196,7 +196,14 @@ class AuthController {
       const userId = req.user.userId;
 
       const user = await User.findByPk(userId, {
-        attributes: ['id', 'email', 'fullName', 'createdAt', 'lastLogin', 'isActive', 'subscriptionTier'],
+        // Phase 10 (PRD §3.11): timezone + the check-in streak are
+        // User-level state (not part of the life-twin's
+        // UserProfileSummary), so this is where they're actually
+        // readable -- see checkInStreak.service.js for how they update.
+        attributes: [
+          'id', 'email', 'fullName', 'createdAt', 'lastLogin', 'isActive', 'subscriptionTier',
+          'timezone', 'currentStreak', 'longestStreak', 'lastCheckInDate',
+        ],
       });
 
       if (!user) {
@@ -224,7 +231,7 @@ class AuthController {
   async updateProfile(req, res, next) {
     try {
       const userId = req.user.userId;
-      const { fullName } = req.body;
+      const { fullName, timezone } = req.body;
 
       const user = await User.findByPk(userId);
       if (!user) {
@@ -237,6 +244,14 @@ class AuthController {
       // Update allowed fields
       if (fullName !== undefined) {
         user.fullName = fullName;
+      }
+      // Phase 10 (PRD §3.11): captured once client-side, typically right
+      // after login/signup. Everything that reads this (the check-in
+      // streak's local-day boundary, the evening digest's local-hour
+      // match) falls back to UTC on its own if this is never set, so
+      // there's nothing else to wire up here beyond persisting it.
+      if (timezone !== undefined) {
+        user.timezone = timezone;
       }
 
       await user.save();
@@ -251,6 +266,7 @@ class AuthController {
             id: user.id,
             email: user.email,
             fullName: user.fullName,
+            timezone: user.timezone,
           },
         },
       });

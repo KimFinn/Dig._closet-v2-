@@ -24,6 +24,7 @@ const cloudinary = require('../configurations/cloudinary');
 const { MCPFashionTagger, MCPConfig, VisionProvider } = require('../services/fashionTagger');
 const { enqueueTaggingJob } = require('../queues/taggingQueue');
 const { analyzeWearEvent } = require('../services/outfitAnalytics.service');
+const { recordCheckIn } = require('../services/checkInStreak.service');
 const redis = require('redis');
 const Joi = require('joi'); // For request validation
 
@@ -1101,6 +1102,11 @@ class ClothesController {
                 action: 'wear',
                 context: Object.keys(analytics).length > 0 ? analytics : undefined,
             });
+
+            // Phase 10 (PRD §3.11): "checking in" is just logging a wear --
+            // no separate action to build. Idempotent within a day, so
+            // wearing several items today only counts once.
+            await recordCheckIn(userId);
 
             // Invalidate cache
             await invalidateCache(`clothes:item:${itemId}`);

@@ -288,14 +288,49 @@ async function computeOccasionHabits(userId) {
   return { 'occasion_habits.occasion_distribution': occasionDistribution, 'occasion_habits.formality_lean': formalityLean };
 }
 
+// ---------------------------------------------------------------------------
+// Closet health score -- Phase 10 (PRD §3.11, scoped 2026-09-18).
+//
+// Deliberately NOT one of the four Phase 9 pillars above (it isn't in
+// TRAIT_PILLARS, and it has no inferred_preference companion -- the
+// 2026-09-18 decision was a single, simple, explainable number, not a
+// blended score). Computed alongside the same nightly synthesis pass so
+// it shows up in the existing "what I know about you" dashboard
+// (profileDashboard.service.js) as one more card, rather than a new
+// screen or its own nightly job.
+// ---------------------------------------------------------------------------
+const CLOSET_HEALTH_WINDOW_DAYS = parseInt(process.env.CLOSET_HEALTH_WINDOW_DAYS || '60', 10);
+
+async function computeClosetHealthScore(userId) {
+  const cutoff = new Date(Date.now() - CLOSET_HEALTH_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const items = await Clothes.findAll({
+    where: { userId, isActive: true },
+    attributes: ['lastWornAt'],
+    raw: true,
+  });
+  const totalItems = items.length;
+  const wornRecently = items.filter((i) => i.lastWornAt && new Date(i.lastWornAt) >= cutoff).length;
+
+  return {
+    'closet_health.wear_recency': {
+      pillar: 'closet_health',
+      traitType: 'observed_fact', // arithmetic over the user's own rows, same as any other observed_fact -- suppress-only, never "wrong"
+      value: { totalItems, wornRecently, windowDays: CLOSET_HEALTH_WINDOW_DAYS, percentWornRecently: pct(wornRecently, totalItems) },
+      confidence: confidenceFromCount(totalItems, 10),
+      computedAt: new Date().toISOString(),
+    },
+  };
+}
+
 async function computeStructuredTraits(userId) {
-  const [style, travel, spending, occasion] = await Promise.all([
+  const [style, travel, spending, occasion, closetHealth] = await Promise.all([
     computeStyleEvolution(userId),
     computeTravelInterests(userId),
     computeSpendingPatterns(userId),
     computeOccasionHabits(userId),
+    computeClosetHealthScore(userId),
   ]);
-  return { ...style, ...travel, ...spending, ...occasion };
+  return { ...style, ...travel, ...spending, ...occasion, ...closetHealth };
 }
 
 /**
@@ -396,6 +431,7 @@ module.exports = {
   TRAIT_PILLARS,
   REVERSAL_STREAK_NIGHTS,
   computeStructuredTraits,
+  computeClosetHealthScore,
   applyCorrectionsAndDetectReversal,
   synthesizeProfileForUser,
   getActiveUserIdsForSynthesis,

@@ -73,6 +73,15 @@ const passwordChangeSchema = Joi.object({
 
 const profileUpdateSchema = Joi.object({
   fullName: Joi.string().min(2).max(100).optional(),
+  // Phase 10 (PRD §3.11, scoped 2026-09-18): captured once client-side
+  // (e.g. Intl.DateTimeFormat().resolvedOptions().timeZone) so the
+  // evening-digest send-hour preference means the user's own local
+  // hour, not UTC for everyone. Loosely validated (any non-empty
+  // string up to a generous length) rather than against a fixed IANA
+  // list -- the list itself changes over time and isn't worth vendoring
+  // here; an invalid value just falls back to UTC everywhere it's read
+  // (see checkInStreak.service.js), it never breaks anything.
+  timezone: Joi.string().min(1).max(64).optional(),
 });
 
 // Both Google and Apple's native sign-in SDKs hand the frontend a signed

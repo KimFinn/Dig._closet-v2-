@@ -102,6 +102,61 @@ function dailyCheckInEmail(user) {
 }
 
 /**
+ * Phase 10 (PRD §3.11, scoped 2026-09-18): replaces `dailyCheckInEmail`
+ * as what `queues/checkInQueue.js` actually sends -- one evening digest
+ * bundling the check-in prompt (only when not already logged today),
+ * an "on this day" memory (when one exists), and a "haven't worn this
+ * in a while" nudge (when one is eligible), rather than three separate
+ * emails. Directly resolves this section's own notification-fatigue
+ * concern. `dailyCheckInEmail` above is left in place/exported (not
+ * removed) in case anything else ever wants the plain single-purpose
+ * version.
+ */
+function eveningDigestEmail(user, { hasCheckedInToday = false, onThisDay = null, nudge = null } = {}) {
+  const appLink = FRONTEND_URL || '#';
+  const firstName = (user.fullName || '').split(' ')[0] || 'there';
+
+  const checkInSection = hasCheckedInToday
+    ? ''
+    : `<p>Quick check-in: what did you wear today? Telling us takes a few seconds and helps your outfit recommendations get better over time.</p>`;
+
+  let onThisDaySection = '';
+  if (onThisDay && onThisDay.hasMemory) {
+    const label = onThisDay.outfit?.name
+      ? `your "${onThisDay.outfit.name}" outfit`
+      : onThisDay.item
+      ? `a ${onThisDay.item.color ? onThisDay.item.color + ' ' : ''}${onThisDay.item.type || 'item'}`
+      : 'something from your closet';
+    onThisDaySection = `<p>🕰️ <strong>On this day ${onThisDay.yearsAgo === 1 ? 'last year' : `${onThisDay.yearsAgo} years ago`}</strong>, you wore ${label}. Feeling nostalgic? You could bring it back today.</p>`;
+  }
+
+  let nudgeSection = '';
+  if (nudge) {
+    const label = `${nudge.color ? nudge.color + ' ' : ''}${nudge.type || 'item'}${nudge.brand ? ` (${nudge.brand})` : ''}`;
+    nudgeSection = nudge.neverWorn
+      ? `<p>👀 You've never worn your ${label} yet — maybe today's the day?</p>`
+      : `<p>👀 You haven't worn your ${label} in a while — maybe today's the day?</p>`;
+  }
+
+  return {
+    subject: 'Your evening wardrobe check-in',
+    html: `
+      <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Hi ${firstName},</h2>
+        ${checkInSection}
+        ${onThisDaySection}
+        ${nudgeSection}
+        <p><a href="${appLink}" style="display:inline-block;padding:10px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">Open your wardrobe</a></p>
+        <p style="color:#888;font-size:12px;margin-top:24px;">
+          You're getting this one evening digest instead of separate emails to keep your inbox tidy.
+          You can turn this off any time in your notification settings, or change what time it arrives.
+        </p>
+      </div>
+    `,
+  };
+}
+
+/**
  * Phase 3: sent by queues/tripMaintenanceQueue.js when the forecast for
  * an upcoming/active trip has drifted enough since the packing list was
  * generated that it auto-regenerated the list. `changes` is an array of
@@ -287,6 +342,7 @@ function closetShareStatusEmail(toUser, otherUser, share, event) {
 module.exports = {
   sendNotification,
   dailyCheckInEmail,
+  eveningDigestEmail,
   tripReplanEmail,
   gapPurchaseCheckInEmail,
   budgetReminderEmail,

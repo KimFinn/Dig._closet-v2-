@@ -146,6 +146,41 @@ const User = sequelize.define('User', {
         defaultValue: 'free',
         field: 'subscription_tier',
         validate: { isIn: { args: [['free', 'plus', 'pro']] } }
+    },
+
+    // Phase 10 (PRD §3.11, scoped 2026-09-18): retention mechanics.
+    // `timezone` is a real IANA name captured once client-side (see
+    // auth.controller.js#updateProfile) -- nothing tracked this before,
+    // and the evening-digest send-hour preference is meaningless without
+    // it. Null falls back to UTC everywhere this is read.
+    timezone: {
+        type: DataTypes.STRING(64),
+        allowNull: true,
+        comment: 'IANA timezone, e.g. "America/New_York". Null falls back to UTC.'
+    },
+
+    // Daily check-in streak. "Checking in" = logging a wear -- see
+    // checkInStreak.service.js -- no separate action needed. A missed
+    // day FREEZES the streak at its current count rather than resetting
+    // it to 0 (2026-09-18 decision: genuinely non-punitive mechanics,
+    // not just softer copy), so this only ever goes up.
+    currentStreak: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+        field: 'current_streak'
+    },
+    longestStreak: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+        field: 'longest_streak'
+    },
+    lastCheckInDate: {
+        type: DataTypes.DATEONLY,
+        allowNull: true,
+        field: 'last_check_in_date',
+        comment: "The user's own local calendar date of their last counted check-in."
     }
 
 }, {
@@ -382,6 +417,16 @@ const Clothes = sequelize.define('Clothes', {
         type: DataTypes.DATE,
         field: 'last_worn_at',
         comment: 'Timestamp of when the item was last worn'
+    },
+    // Phase 10 (PRD §3.11): last time this item was surfaced in a
+    // "haven't worn this in a while" evening-digest nudge. Distinct from
+    // lastWornAt -- purely a cooldown so the same neglected item isn't
+    // renominated every single night (see closetResurfacing.service.js).
+    lastNudgedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        field: 'last_nudged_at',
+        comment: 'Last time this item was included in a resurfacing nudge (cooldown, not a wear event).'
     },
     isActive: {
         type: DataTypes.BOOLEAN,

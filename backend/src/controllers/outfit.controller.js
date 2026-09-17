@@ -22,6 +22,7 @@ const OutfitRecommendationService = require("../services/AIOutfit recommendation
 const WeatherService = require("../services/weather.service");
 const { Trip, UserInteraction, Outfit, OutfitRating } = require("../database/models");
 const { analyzeWearEvent } = require("../services/outfitAnalytics.service");
+const { recordCheckIn } = require("../services/checkInStreak.service");
 const logger = require('../utils/logger');
 // Phase 0 fix: express-validator's `validationResult` was imported here
 // but never actually called anywhere in this file — every write path
@@ -1445,6 +1446,11 @@ class OutfitController {
                 action: 'wear',
                 context: { date: new Date(), ...analytics }
             });
+
+            // Phase 10 (PRD §3.11): "checking in" is just logging a wear --
+            // no separate action to build. Idempotent within a day, so
+            // wearing several outfits today only counts once.
+            await recordCheckIn(userId);
 
             // Invalidate caches
             await invalidateCache(`outfit:${outfitId}`);
