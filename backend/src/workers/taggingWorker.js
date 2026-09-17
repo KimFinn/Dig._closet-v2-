@@ -40,6 +40,13 @@ const { productFeedIngestionQueue, processProductFeedIngestion } = require('../q
 const { destinationAdvisoryQueue, processDestinationAdvisoryIngestion } = require('../queues/destinationAdvisoryQueue');
 const { budgetReminderQueue, processBudgetReminderDispatch } = require('../queues/budgetReminderQueue');
 const { aiOutfitService } = require('../services/AIOutfit recommendation');
+// Phase 9: digital life-twin nightly profile synthesis + the raw
+// UserInteraction retention purge (PRD §3.10, §8 item 4). Same
+// one-process-for-now reasoning as every other nightly job above --
+// once/night, DB-only cost, not worth a dedicated process yet.
+const { profileSynthesisQueue, SYNTHESIS_CONCURRENCY } = require('../queues/profileSynthesisQueue');
+const { synthesizeProfileForUser, getActiveUserIdsForSynthesis } = require('../services/profileSynthesis.service');
+const { purgeOldInteractions } = require('../services/interactionRetention.service');
 
 const CONCURRENCY = parseInt(process.env.TAGGING_WORKER_CONCURRENCY || '3', 10);
 
@@ -322,6 +329,45 @@ budgetReminderQueue.process('budget-reminder-dispatch-run', 1, async (job) => {
 
 logger.info('Budget reminder dispatch processor started');
 
+// ============================================================================
+// Phase 9: digital life-twin nightly profile synthesis + retention purge
+// (PRD §3.10, §8 item 4)
+// ============================================================================
+
+profileSynthesisQueue.process('nightly-synthesize-all', 1, async (job) => {
+  const userIds = await getActiveUserIdsForSynthesis();
+
+  logger.info('Nightly profile-synthesis run starting', {
+    jobId: job.id,
+    userCount: userIds.length,
+    concurrency: SYNTHESIS_CONCURRENCY,
+  });
+
+  const results = await runWithConcurrency(userIds, SYNTHESIS_CONCURRENCY, async (userId) => {
+    try {
+      await synthesizeProfileForUser(userId);
+    } catch (error) {
+      // One user's bad data (or a transient DB hiccup) shouldn't stop
+      // the rest of the run.
+      logger.warn('Nightly profile synthesis failed for one user', { userId, error: error.message });
+      throw error;
+    }
+  });
+
+  const succeeded = results.filter((r) => r.status === 'fulfilled').length;
+  const failed = results.filter((r) => r.status === 'rejected').length;
+  logger.info('Nightly profile-synthesis run complete', { succeeded, failed, total: userIds.length });
+
+  return { succeeded, failed, total: userIds.length };
+});
+
+profileSynthesisQueue.process('nightly-interaction-purge', 1, async (job) => {
+  logger.info('Nightly UserInteraction retention purge starting', { jobId: job.id });
+  return await purgeOldInteractions();
+});
+
+logger.info(`Profile-synthesis processors started (nightly-synthesize-all concurrency: ${SYNTHESIS_CONCURRENCY})`);
+
 process.on('SIGTERM', async () => {
   await taggingQueue.close();
   await preferenceLearningQueue.close();
@@ -331,6 +377,7 @@ process.on('SIGTERM', async () => {
   await productFeedIngestionQueue.close();
   await destinationAdvisoryQueue.close();
   await budgetReminderQueue.close();
+  await profileSynthesisQueue.close();
   process.exit(0);
 });
 process.on('SIGINT', async () => {
@@ -342,5 +389,6 @@ process.on('SIGINT', async () => {
   await productFeedIngestionQueue.close();
   await destinationAdvisoryQueue.close();
   await budgetReminderQueue.close();
+  await profileSynthesisQueue.close();
   process.exit(0);
 });

@@ -2012,6 +2012,61 @@ const LearnedPreferences = sequelize.define('LearnedPreferences', {
     tableName: 'learned_preferences'
 });
 
+// Phase 9 (PRD §3.10): the digital life-twin's persisted output. See
+// migration 20260925000001-create-user-profile-summaries for the full
+// rationale behind keeping structuredTraits (always the live, real
+// computation) and userCorrections (the separate override/suppression
+// overlay, applied at read time by each consumer) as two distinct
+// columns rather than baking corrections into the trait values.
+const UserProfileSummary = sequelize.define('UserProfileSummary', {
+    id: {
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
+        primaryKey: true
+    },
+    userId: {
+        type: DataTypes.UUID,
+        allowNull: false,
+        unique: true,
+        field: 'user_id',
+        references: { model: 'users', key: 'id' }
+    },
+    version: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0
+    },
+    computedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        field: 'computed_at'
+    },
+    structuredTraits: {
+        type: DataTypes.JSONB,
+        allowNull: false,
+        defaultValue: {},
+        field: 'structured_traits'
+    },
+    narrativeSummary: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        field: 'narrative_summary'
+    },
+    narrativeGeneratedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        field: 'narrative_generated_at'
+    },
+    userCorrections: {
+        type: DataTypes.JSONB,
+        allowNull: false,
+        defaultValue: {},
+        field: 'user_corrections'
+    }
+}, {
+    tableName: 'user_profile_summaries'
+});
+
 // Phase 5: local mirror of affiliate network product feeds (see
 // migration 20260922000001-create-product-feed-items.js for the full
 // rationale -- feeds are bulk downloads, not a live search API, so
@@ -2130,6 +2185,10 @@ Clothes.hasOne(ClothesAttributes, {foreignKey: 'clothes_id'});
 
 User.hasOne(LearnedPreferences, {foreignKey: 'user_id'});
 LearnedPreferences.belongsTo(User, {foreignKey: 'user_id'});
+
+// Phase 9 (PRD §3.10)
+User.hasOne(UserProfileSummary, {foreignKey: 'user_id'});
+UserProfileSummary.belongsTo(User, {foreignKey: 'user_id'});
 
 // Phase 7 (Trip Activities, Places, Destination Intelligence & Budgeting,
 // PRD §3.8/§3.15) -- new models. See feature-roadmap-tracker.md Phase 7.
@@ -2310,5 +2369,6 @@ module.exports = {
     DestinationCostTier,
     BudgetReminder,
     ClosetShare,
-    GroupOutfit
+    GroupOutfit,
+    UserProfileSummary
 };

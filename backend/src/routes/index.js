@@ -16,6 +16,9 @@ const budgetRoutes = require('./budget.routes');
 // Phase 8 (Group Trips & Hybrid Group Outfits)
 const closetShareRoutes = require('./closetShare.routes');
 const participantInviteRoutes = require('./participantInvite.routes');
+// Phase 9 (Digital Life-Twin & Grounded Chatbot)
+const profileRoutes = require('./profile.routes');
+const chatbotRoutes = require('./chatbot.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -30,6 +33,8 @@ router.use('/destination', destinationRoutes);
 router.use('/budget', budgetRoutes);
 router.use('/closet-shares', closetShareRoutes);
 router.use('/invites', participantInviteRoutes);
+router.use('/profile', profileRoutes);
+router.use('/chatbot', chatbotRoutes);
 
 // API info endpoint
 router.get('/', (req, res) => {

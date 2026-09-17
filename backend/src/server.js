@@ -30,6 +30,7 @@ const { scheduleGapPurchaseFollowup } = require('./queues/gapPurchaseFollowupQue
 const { scheduleProductFeedIngestion } = require('./queues/productFeedIngestionQueue');
 const { scheduleDestinationAdvisoryIngestion } = require('./queues/destinationAdvisoryQueue');
 const { scheduleBudgetReminderDispatch } = require('./queues/budgetReminderQueue');
+const { scheduleNightlyProfileSynthesis, scheduleInteractionPurge } = require('./queues/profileSynthesisQueue');
 const { seedDestinationCulture } = require('./services/destinationCulture.service');
 const { seedDestinationCostTiers } = require('./services/destinationCostTier.service');
 
@@ -229,6 +230,15 @@ async function startServer() {
         // manually-edited one. See destinationCulture.service.js.
         await seedDestinationCulture();
         await seedDestinationCostTiers();
+
+        // Phase 9: register the nightly digital-life-twin profile
+        // synthesis job and the raw UserInteraction retention purge job
+        // (PRD §3.10, §8 item 4 -- resolved 2026-09-18: 90-day purge on
+        // raw interactions only, UserProfileSummary itself persists
+        // indefinitely). Same idempotent-registration pattern as every
+        // other scheduled job above -- see queues/profileSynthesisQueue.js.
+        await scheduleNightlyProfileSynthesis();
+        await scheduleInteractionPurge();
 
         //Start the server
         server.listen(PORT,HOST,() => {
