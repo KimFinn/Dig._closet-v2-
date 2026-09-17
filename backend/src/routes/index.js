@@ -8,6 +8,7 @@ const outfitRoutes = require('./outfit.routes');
 const tripRoutes = require('./trip.routes');
 const preferenceRoutes = require('./userPreference.routes');
 const notificationRoutes = require('./notification.routes');
+const gapPurchaseRoutes = require('./gapPurchase.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -16,6 +17,7 @@ router.use('/outfit',outfitRoutes);
 router.use('/trip',tripRoutes);
 router.use("/UserPreference",preferenceRoutes);
 router.use('/notifications', notificationRoutes);
+router.use('/gap-recommendations', gapPurchaseRoutes);
 
 // API info endpoint
 router.get('/', (req, res) => {

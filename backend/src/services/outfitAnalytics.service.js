@@ -30,8 +30,15 @@ function startOfToday() {
 async function detectSwap(userId, wornItemIds = []) {
   if (!wornItemIds || wornItemIds.length === 0) return null;
 
+  // Phase 5 fix: recommendation_logs now also holds gap_purchase rows
+  // (funnel logging for the gap-to-purchase feature). Without this
+  // filter, a gap_purchase row created later today would win "most
+  // recent" over an earlier real outfit recommendation, and -- since it
+  // has no recommendedOutfits array -- silently return null instead of
+  // detecting a real swap. recommendationType defaults to 'outfit' on
+  // every pre-Phase-5 row, so this filter is a no-op for existing data.
   const recentLog = await RecommendationLog.findOne({
-    where: { userId, createdAt: { [Op.gte]: startOfToday() } },
+    where: { userId, recommendationType: 'outfit', createdAt: { [Op.gte]: startOfToday() } },
     order: [['createdAt', 'DESC']],
   });
   if (!recentLog || !Array.isArray(recentLog.recommendedOutfits)) return null;

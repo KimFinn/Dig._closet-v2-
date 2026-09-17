@@ -26,6 +26,8 @@ const { tripModeManager } = require('./services/tripModeManager.service');
 const { scheduleNightlyLearning } = require('./queues/preferenceLearningQueue');
 const { scheduleDailyCheckIn } = require('./queues/checkInQueue');
 const { scheduleTripMaintenance } = require('./queues/tripMaintenanceQueue');
+const { scheduleGapPurchaseFollowup } = require('./queues/gapPurchaseFollowupQueue');
+const { scheduleProductFeedIngestion } = require('./queues/productFeedIngestionQueue');
 
 // ============================================================================
 // CORS ORIGIN ALLOWLIST
@@ -194,6 +196,19 @@ async function startServer() {
         // idempotent-registration pattern as the two calls above -- see
         // src/queues/tripMaintenanceQueue.js.
         await scheduleTripMaintenance();
+
+        // Phase 5: register the gap-purchase funnel followup job
+        // (conversion reconciliation + "did you buy it?" self-report
+        // check-in). Same idempotent-registration pattern as the calls
+        // above -- see src/queues/gapPurchaseFollowupQueue.js.
+        await scheduleGapPurchaseFollowup();
+
+        // Phase 5: register the nightly product feed ingestion job
+        // (Task #38) -- keeps product_feed_items in sync so Task #39's
+        // style-aware matching has data to query. Same idempotent-
+        // registration pattern as the calls above -- see
+        // src/queues/productFeedIngestionQueue.js.
+        await scheduleProductFeedIngestion();
 
         //Start the server
         server.listen(PORT,HOST,() => {

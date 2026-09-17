@@ -150,6 +150,20 @@ router.patch(
     TripController.updateDayActivity
 );
 
+/**
+ * @route   GET /api/trips/:tripId/gap-recommendations
+ * @desc    Phase 5 -- list this trip's gap-to-purchase funnel entries,
+ *          each resolved to a purchase suggestion or an explicit
+ *          "too urgent to ship" result.
+ * @access  Private
+ */
+router.get(
+    '/:tripId/gap-recommendations',
+    authenticate,
+    validateTripId,
+    TripController.getGapRecommendations
+);
+
 // To be implemented later
 
 // /**

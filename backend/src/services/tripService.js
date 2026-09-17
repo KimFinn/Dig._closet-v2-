@@ -8,6 +8,7 @@
 const { Trip, User } = require('../database/models');
 const { packagingService } = require('./packaging.service');
 const WeatherService = require('./weather.service');
+const { recordGapRecommendations } = require('./gapRecommendation.service');
 const logger = require('../utils/logger');
 
 class TripService {
@@ -83,6 +84,21 @@ class TripService {
       // ✅ STEP 9: If trip starts today, activate trip mode immediately
       if (status === 'active' && packingListResult) {
         await this._activateTripMode(userId, trip.id, packingListResult, validatedData);
+      }
+
+      // Phase 5: log any packing gaps as gap-to-purchase funnel entries.
+      // Awaited (not fire-and-forget) so the funnel row exists by the
+      // time this response returns, but wrapped defensively -- a
+      // logging failure here should never turn into a failed trip
+      // creation for the user (gapRecommendation.service already
+      // catches per-gap write errors internally; this guards the outer
+      // lookups too).
+      if (packingListResult?.gaps?.length > 0) {
+        try {
+          await recordGapRecommendations(userId, trip.id, packingListResult.gaps);
+        } catch (error) {
+          logger.warn('Gap recommendation logging failed after trip creation', { userId, tripId: trip.id, error: error.message });
+        }
       }
 
       return {
@@ -169,6 +185,17 @@ class TripService {
         endDate: trip.endDate,
         destination: trip.destination
       });
+    }
+
+    // Phase 5: dedup'd against anything already logged for this trip --
+    // see gapRecommendation.service.js for why a regenerate doesn't
+    // re-suggest (or reset the funnel stage of) a gap already logged.
+    if (packingListResult?.gaps?.length > 0) {
+      try {
+        await recordGapRecommendations(userId, tripId, packingListResult.gaps);
+      } catch (error) {
+        logger.warn('Gap recommendation logging failed after regenerate', { userId, tripId, error: error.message });
+      }
     }
 
     logger.info('Packing list regenerated successfully', {
@@ -275,6 +302,17 @@ class TripService {
         logger.info('Packing list regenerated for changed trip dates', {
           userId, tripId, totalItems: packingListResult?.tripWardrobe?.totalItems ?? 0
         });
+
+        // Phase 5: same dedup'd gap-recommendation logging as
+        // regeneratePackingList() -- a date-change regenerate is still a
+        // regenerate as far as the funnel is concerned.
+        if (packingListResult?.gaps?.length > 0) {
+          try {
+            await recordGapRecommendations(userId, tripId, packingListResult.gaps);
+          } catch (error) {
+            logger.warn('Gap recommendation logging failed after trip date change', { userId, tripId, error: error.message });
+          }
+        }
       }
     }
 

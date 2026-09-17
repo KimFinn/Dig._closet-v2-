@@ -233,8 +233,12 @@ function assignContext(context, wardrobeByCategory, capsule, itemsById, gaps) {
     capsule.get('bottom').add(bottomPick.item.id);
   } else {
     // Neither a dress nor a full top+bottom pair is achievable.
-    if (!topPick) gaps.push({ date: context.date, time: context.time, occasion: context.occasion, category: 'top', message: `No suitable top for ${context.occasion} on ${context.date}${context.weather ? ` (${Math.round(context.weather.temp)}°C)` : ''}.` });
-    if (!bottomPick && !dressPick) gaps.push({ date: context.date, time: context.time, occasion: context.occasion, category: 'bottom', message: `No suitable bottom or dress for ${context.occasion} on ${context.date}.` });
+    // Phase 5: `weather` carried on each gap entry (not just baked into
+    // the message string) so the gap-to-purchase funnel can build a
+    // structured descriptive spec (temp/condition/confidence) instead of
+    // having to re-parse a human-readable sentence.
+    if (!topPick) gaps.push({ date: context.date, time: context.time, occasion: context.occasion, category: 'top', weather: context.weather || null, message: `No suitable top for ${context.occasion} on ${context.date}${context.weather ? ` (${Math.round(context.weather.temp)}°C)` : ''}.` });
+    if (!bottomPick && !dressPick) gaps.push({ date: context.date, time: context.time, occasion: context.occasion, category: 'bottom', weather: context.weather || null, message: `No suitable bottom or dress for ${context.occasion} on ${context.date}.` });
     if (topPick) { chosenIds.push(topPick.item.id); capsule.get('top').add(topPick.item.id); }
     if (bottomPick) { chosenIds.push(bottomPick.item.id); capsule.get('bottom').add(bottomPick.item.id); }
   }
@@ -244,7 +248,7 @@ function assignContext(context, wardrobeByCategory, capsule, itemsById, gaps) {
     chosenIds.push(footwearPick.item.id);
     capsule.get('footwear').add(footwearPick.item.id);
   } else {
-    gaps.push({ date: context.date, time: context.time, occasion: context.occasion, category: 'footwear', message: `No suitable footwear for ${context.date}.` });
+    gaps.push({ date: context.date, time: context.time, occasion: context.occasion, category: 'footwear', weather: context.weather || null, message: `No suitable footwear for ${context.date}.` });
   }
 
   const outerwear = outerwearNeed(context.weather);
@@ -255,7 +259,7 @@ function assignContext(context, wardrobeByCategory, capsule, itemsById, gaps) {
       capsule.get('outerwear').add(outerwearPick.item.id);
     } else {
       const hedgeNote = outerwear.reason === 'confidence-hedge' ? ' (packed as a buffer -- this day\'s weather is an estimate, not a live forecast)' : '';
-      gaps.push({ date: context.date, time: context.time, occasion: context.occasion, category: 'outerwear', message: `No warm/rain layer available for ${context.date}${context.weather ? ` (${Math.round(context.weather.temp)}°C${context.weather.precipitation > 0.4 ? ', wet' : ''})` : ''}${hedgeNote}.` });
+      gaps.push({ date: context.date, time: context.time, occasion: context.occasion, category: 'outerwear', weather: context.weather || null, message: `No warm/rain layer available for ${context.date}${context.weather ? ` (${Math.round(context.weather.temp)}°C${context.weather.precipitation > 0.4 ? ', wet' : ''})` : ''}${hedgeNote}.` });
     }
   }
 

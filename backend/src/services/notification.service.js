@@ -136,10 +136,38 @@ function tripReplanEmail(user, trip, changes) {
   };
 }
 
+/**
+ * Phase 5: "did you end up buying it?" self-report, sent for a
+ * gap-purchase suggestion the user clicked through on but hasn't been
+ * confirmed as purchased yet (either self-reported or via network
+ * conversion reconciliation). Faster signal than waiting on the
+ * network's own delayed conversion reporting -- see
+ * affiliateConversion.service.js.
+ */
+function gapPurchaseCheckInEmail(user, gapDetails) {
+  const appLink = FRONTEND_URL || '#';
+  const firstName = (user.fullName || '').split(' ')[0] || 'there';
+  const category = gapDetails?.category || 'item';
+  return {
+    subject: `Did you end up getting that ${category}?`,
+    html: `
+      <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Hi ${firstName},</h2>
+        <p>You checked out a ${category} we suggested a little while ago. Did you end up buying it?</p>
+        <p><a href="${appLink}" style="display:inline-block;padding:10px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">Let us know</a></p>
+        <p style="color:#888;font-size:12px;margin-top:24px;">
+          You're getting this because you clicked through a purchase suggestion recently.
+        </p>
+      </div>
+    `,
+  };
+}
+
 module.exports = {
   sendNotification,
   dailyCheckInEmail,
   tripReplanEmail,
+  gapPurchaseCheckInEmail,
   // exported for tests / direct use if ever needed
   sendEmail,
   sendPush,

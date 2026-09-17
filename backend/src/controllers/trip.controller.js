@@ -1,4 +1,6 @@
 const {tripService} = require('../services/tripService');
+const { RecommendationLog } = require('../database/models');
+const { getGapPurchaseSuggestion } = require('../services/gapPurchase.service');
 const logger = require('../utils/logger');
 // Phase 0 fix: validation is now handled entirely by the Joi middleware
 // in trip.validation.js (applied in trip.routes.js) — request bodies/
@@ -460,6 +462,40 @@ class TripController {
     //         next(error);
     //     }
     // }
+
+  /**
+   * Phase 5 -- list this trip's gap-to-purchase funnel entries, each
+   * resolved to either a purchase suggestion (with an affiliate link) or
+   * an explicit "too urgent to ship" result. See gapPurchase.service.js.
+   * @route GET /api/trips/:tripId/gap-recommendations
+   */
+  static async getGapRecommendations(req, res, next) {
+    try {
+      const userId = req.user.userId;
+      const { tripId } = req.params;
+
+      const rows = await RecommendationLog.findAll({
+        where: { userId, tripId, recommendationType: 'gap_purchase' },
+        order: [['createdAt', 'ASC']],
+      });
+
+      const suggestions = await Promise.all(
+        rows.map((row) => getGapPurchaseSuggestion(userId, row.id))
+      );
+
+      res.status(200).json({
+        success: true,
+        data: { gapRecommendations: suggestions },
+      });
+    } catch (error) {
+      logger.error('Get gap recommendations error', {
+        error: error.message,
+        userId: req.user?.userId,
+        tripId: req.params?.tripId,
+      });
+      next(error);
+    }
+  }
 }
 
 

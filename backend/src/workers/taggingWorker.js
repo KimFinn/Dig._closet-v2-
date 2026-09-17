@@ -35,6 +35,8 @@ const { checkInQueue, processDailyCheckIn } = require('../queues/checkInQueue');
 // one-process-for-now reasoning as the two queues above -- once/night,
 // DB + a couple of bounded external calls, not worth a dedicated process yet.
 const { tripMaintenanceQueue, processTripMaintenance } = require('../queues/tripMaintenanceQueue');
+const { gapPurchaseFollowupQueue, processGapPurchaseFollowup } = require('../queues/gapPurchaseFollowupQueue');
+const { productFeedIngestionQueue, processProductFeedIngestion } = require('../queues/productFeedIngestionQueue');
 const { aiOutfitService } = require('../services/AIOutfit recommendation');
 
 const CONCURRENCY = parseInt(process.env.TAGGING_WORKER_CONCURRENCY || '3', 10);
@@ -273,11 +275,36 @@ tripMaintenanceQueue.process('trip-maintenance-run', 1, async (job) => {
 
 logger.info('Trip maintenance processor started');
 
+// ============================================================================
+// Phase 5: gap-purchase funnel followup (conversion reconciliation +
+// self-report check-in)
+// ============================================================================
+
+gapPurchaseFollowupQueue.process('gap-purchase-followup-run', 1, async (job) => {
+  logger.info('Gap-purchase followup run starting', { jobId: job.id });
+  return await processGapPurchaseFollowup();
+});
+
+logger.info('Gap-purchase followup processor started');
+
+// ============================================================================
+// Phase 5: product feed ingestion (Task #38)
+// ============================================================================
+
+productFeedIngestionQueue.process('product-feed-ingestion-run', 1, async (job) => {
+  logger.info('Product feed ingestion run starting', { jobId: job.id });
+  return await processProductFeedIngestion();
+});
+
+logger.info('Product feed ingestion processor started');
+
 process.on('SIGTERM', async () => {
   await taggingQueue.close();
   await preferenceLearningQueue.close();
   await checkInQueue.close();
   await tripMaintenanceQueue.close();
+  await gapPurchaseFollowupQueue.close();
+  await productFeedIngestionQueue.close();
   process.exit(0);
 });
 process.on('SIGINT', async () => {
@@ -285,5 +312,7 @@ process.on('SIGINT', async () => {
   await preferenceLearningQueue.close();
   await checkInQueue.close();
   await tripMaintenanceQueue.close();
+  await gapPurchaseFollowupQueue.close();
+  await productFeedIngestionQueue.close();
   process.exit(0);
 });

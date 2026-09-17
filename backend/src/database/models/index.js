@@ -1388,6 +1388,13 @@ const UserPreferences = sequelize.define('UserPreferences', {
         type: DataTypes.JSONB,
         defaultValue: {}
     },
+    // Phase 5 (Gap-to-Purchase Funnel, PRD §3.14) -- affiliate-region
+    // fallback when no trip is active. Free-text, matching Trip.country's
+    // existing convention rather than introducing strict ISO codes here.
+    homeRegion: {
+        type: DataTypes.STRING(100),
+        field: 'home_region',
+    },
     // Lifestyle
     climate: {
         type: DataTypes.STRING(50)
@@ -1661,12 +1668,84 @@ const RecommendationLog = sequelize.define('RecommendationLog', {
         type: DataTypes.STRING(50),
         field: 'model_version',
         comment: 'ML model version used'
-    }
+    },
+    // Phase 5 (Gap-to-Purchase Funnel) -- a gap-purchase suggestion is
+    // just another kind of recommendation event, logged alongside outfit
+    // recommendations in this same table rather than a new one. Defaults
+    // to 'outfit' so every pre-Phase-5 row (and every existing write in
+    // AIOutfit recommendation.js) keeps its current meaning unchanged --
+    // see outfitAnalytics.service.js's swap-detection query, which now
+    // explicitly filters recommendationType: 'outfit' so a gap-purchase
+    // row created later in the day never gets mistaken for "today's
+    // outfit recommendation."
+    recommendationType: {
+        type: DataTypes.ENUM('outfit', 'gap_purchase'),
+        allowNull: false,
+        defaultValue: 'outfit',
+        field: 'recommendation_type',
+    },
+    funnelStage: {
+        type: DataTypes.ENUM('suggested', 'clicked', 'purchased', 'worn'),
+        field: 'funnel_stage',
+        comment: 'Only meaningful for recommendationType = gap_purchase',
+    },
+    gapDetails: {
+        type: DataTypes.JSONB,
+        field: 'gap_details',
+        comment: 'Descriptive gap spec: category, attributes (color/warmth/etc), reason',
+    },
+    tripId: {
+        type: DataTypes.UUID,
+        field: 'trip_id',
+        references: { model: 'trips', key: 'id' },
+    },
+    urgency: {
+        type: DataTypes.ENUM('purchase_eligible', 'too_urgent'),
+        comment: 'Result of the days-until-needed vs shipping-lead-time check',
+    },
+    region: {
+        type: DataTypes.STRING(100),
+        comment: 'Resolved region (free-text country name, e.g. "United Kingdom" -- see region.service.js) used to pick the affiliate link',
+    },
+    affiliateNetwork: {
+        type: DataTypes.STRING(50),
+        field: 'affiliate_network',
+        comment: 'e.g. "skimlinks", "awin", or "mock" when built credential-gated with no live key',
+    },
+    affiliateLink: {
+        type: DataTypes.TEXT,
+        field: 'affiliate_link',
+    },
+    matchedProduct: {
+        type: DataTypes.JSONB,
+        field: 'matched_product',
+        comment: 'Set once product-feed style matching finds a specific SKU; null for a v1 search-results-page link',
+    },
+    clickedAt: {
+        type: DataTypes.DATE,
+        field: 'clicked_at',
+    },
+    purchasedAt: {
+        type: DataTypes.DATE,
+        field: 'purchased_at',
+    },
+    purchaseSelfReported: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        field: 'purchase_self_reported',
+        comment: 'true if filled by the "did you buy it?" check-in rather than network conversion reconciliation',
+    },
+    wornAt: {
+        type: DataTypes.DATE,
+        field: 'worn_at',
+    },
 }, {
     tableName: 'recommendation_logs',
     indexes: [
         { fields: ['user_id'] },
-        { fields: ['created_at'] }
+        { fields: ['created_at'] },
+        { fields: ['recommendation_type', 'funnel_stage'] },
+        { fields: ['trip_id'] },
     ]
 });
 
@@ -1771,6 +1850,86 @@ const LearnedPreferences = sequelize.define('LearnedPreferences', {
     tableName: 'learned_preferences'
 });
 
+// Phase 5: local mirror of affiliate network product feeds (see
+// migration 20260922000001-create-product-feed-items.js for the full
+// rationale -- feeds are bulk downloads, not a live search API, so
+// style-aware product matching queries this table rather than calling
+// out to a network per recommendation). Populated by
+// productFeed.service.js's runProductFeedIngestion(), credential-gated
+// to a local mock feed until a real direct network is configured.
+const ProductFeedItem = sequelize.define('ProductFeedItem', {
+    id: {
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
+        primaryKey: true
+    },
+    network: {
+        type: DataTypes.STRING(50),
+        allowNull: false,
+        comment: '"mock" until a real direct network is added; then e.g. "awin", "cj"',
+    },
+    externalId: {
+        type: DataTypes.STRING(255),
+        allowNull: false,
+        field: 'external_id',
+        comment: 'The network/merchant\'s own product id -- dedup key together with network',
+    },
+    merchantName: {
+        type: DataTypes.STRING(150),
+        field: 'merchant_name',
+    },
+    title: {
+        type: DataTypes.STRING(255),
+        allowNull: false,
+    },
+    description: DataTypes.TEXT,
+    rawCategory: {
+        type: DataTypes.STRING(150),
+        field: 'raw_category',
+        comment: 'Category string exactly as the feed gave it, pre-normalization',
+    },
+    category: {
+        type: DataTypes.STRING(20),
+        comment: 'Normalized to our own wardrobe categories; null if unrecognized',
+    },
+    brand: DataTypes.STRING(100),
+    color: {
+        type: DataTypes.STRING(50),
+        comment: 'Merchant-dependent -- a soft ranking signal, never a hard filter',
+    },
+    styleTags: {
+        type: DataTypes.JSONB,
+        field: 'style_tags',
+    },
+    price: DataTypes.DECIMAL(10, 2),
+    currency: DataTypes.STRING(3),
+    imageUrl: {
+        type: DataTypes.TEXT,
+        field: 'image_url',
+    },
+    productUrl: {
+        type: DataTypes.TEXT,
+        allowNull: false,
+        field: 'product_url',
+    },
+    deepLink: {
+        type: DataTypes.TEXT,
+        field: 'deep_link',
+    },
+    region: DataTypes.STRING(100),
+    feedFetchedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        field: 'feed_fetched_at',
+    },
+}, {
+    tableName: 'product_feed_items',
+    indexes: [
+        { fields: ['network', 'external_id'], unique: true },
+        { fields: ['category', 'region'] },
+    ]
+});
+
 // Define Associations
 User.hasMany(Clothes,{foreignKey: 'user_id'});
 Clothes.belongsTo(User,{foreignKey: 'user_id'});
@@ -1837,5 +1996,6 @@ module.exports = {
     TripActivity,
     TripParticipant,
     WeatherOutcome,
-    HistoricalWeatherRecord
+    HistoricalWeatherRecord,
+    ProductFeedItem
 };
