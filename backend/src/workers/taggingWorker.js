@@ -93,59 +93,82 @@ async function processTaggingJob(job) {
     return { skipped: true };
   }
 
-  const imageBuffer = await downloadImage(imageUrl);
-  const tagger = getFashionTagger();
-  const taggingResult = await tagger.tagClothing(imageBuffer, userId, clothesId);
+  // Phase 1 fix: everything below used to run with no try/catch of its
+  // own. `tagger.tagClothing()` failing cleanly (taggingResult.success
+  // === false) was handled -- but downloadImage() throwing (bad/expired
+  // image URL, Cloudinary hiccup, plain network failure -- realistically
+  // the MOST common failure mode, more so than the vision API itself
+  // erroring) threw straight out of this function with the item never
+  // touched. Bull would retry and eventually mark the *job* failed, but
+  // the *clothes row* stayed at aiMetadata.status: 'queued' forever --
+  // invisible to GET /clothes/review/needed/:userId, with
+  // needsManualReview still false, so the user never found out tagging
+  // never finished. Wrapping the whole thing means ANY failure here now
+  // lands the item in the same reviewable "failed" state, regardless of
+  // which step it came from.
+  try {
+    const imageBuffer = await downloadImage(imageUrl);
+    const tagger = getFashionTagger();
+    const taggingResult = await tagger.tagClothing(imageBuffer, userId, clothesId);
 
-  if (!taggingResult.success) {
+    if (!taggingResult.success) {
+      throw new Error(taggingResult.error || 'Tagging failed');
+    }
+
+    const meta = taggingResult.metadata;
+    const tags = [
+      meta.clothingCategory,
+      meta.pattern,
+      meta.formality,
+      ...(Array.isArray(meta.color) ? meta.color : []),
+      ...(Array.isArray(meta.fabric) ? meta.fabric : []),
+    ].filter(Boolean);
+
+    await item.update({
+      type: meta.clothingCategory?.trim() || item.type,
+      color: (Array.isArray(meta.color) ? meta.color[0] : meta.color)?.trim(),
+      pattern: meta.pattern?.trim(),
+      fabric: (Array.isArray(meta.fabric) ? meta.fabric[0] : meta.fabric)?.trim(),
+      season: Array.isArray(meta.season) ? meta.season.join(', ') : meta.season,
+      occasion: Array.isArray(meta.occasion) ? meta.occasion.join(', ') : meta.occasion,
+      brand: meta.brand,
+      tags,
+      aiGeneratedTags: true,
+      aiConfidenceScore: meta.confidenceScore,
+      needsManualReview: (meta.confidenceScore ?? 1) < 0.6,
+      aiMetadata: {
+        status: 'complete',
+        confidence: meta.confidenceScore,
+        provider: taggingResult.providerUsed,
+        cached: taggingResult.cached,
+        mode,
+        taggedAt: new Date().toISOString(),
+      },
+    });
+
+    await invalidateUserClothesCache(userId);
+
+    logger.info('Tagging job complete', { jobId: job.id, clothesId, confidence: meta.confidenceScore });
+    return { success: true };
+
+  } catch (error) {
+    // Marked as failed/reviewable on every attempt, not just the last
+    // one -- if a later retry succeeds, the success branch above
+    // overwrites this with the 'complete' state anyway, and in the
+    // meantime the item is visible in the review queue rather than
+    // silently stuck for however long the retries take.
     await item.update({
       needsManualReview: true,
       aiMetadata: {
         status: 'failed',
-        error: taggingResult.error || 'Tagging failed',
+        error: error.message,
         mode,
         attemptedAt: new Date().toISOString(),
       },
     });
     await invalidateUserClothesCache(userId);
-    throw new Error(taggingResult.error || 'Tagging failed');
+    throw error;
   }
-
-  const meta = taggingResult.metadata;
-  const tags = [
-    meta.clothingCategory,
-    meta.pattern,
-    meta.formality,
-    ...(Array.isArray(meta.color) ? meta.color : []),
-    ...(Array.isArray(meta.fabric) ? meta.fabric : []),
-  ].filter(Boolean);
-
-  await item.update({
-    type: meta.clothingCategory?.trim() || item.type,
-    color: (Array.isArray(meta.color) ? meta.color[0] : meta.color)?.trim(),
-    pattern: meta.pattern?.trim(),
-    fabric: (Array.isArray(meta.fabric) ? meta.fabric[0] : meta.fabric)?.trim(),
-    season: Array.isArray(meta.season) ? meta.season.join(', ') : meta.season,
-    occasion: Array.isArray(meta.occasion) ? meta.occasion.join(', ') : meta.occasion,
-    brand: meta.brand,
-    tags,
-    aiGeneratedTags: true,
-    aiConfidenceScore: meta.confidenceScore,
-    needsManualReview: (meta.confidenceScore ?? 1) < 0.6,
-    aiMetadata: {
-      status: 'complete',
-      confidence: meta.confidenceScore,
-      provider: taggingResult.providerUsed,
-      cached: taggingResult.cached,
-      mode,
-      taggedAt: new Date().toISOString(),
-    },
-  });
-
-  await invalidateUserClothesCache(userId);
-
-  logger.info('Tagging job complete', { jobId: job.id, clothesId, confidence: meta.confidenceScore });
-  return { success: true };
 }
 
 taggingQueue.process(CONCURRENCY, processTaggingJob);
