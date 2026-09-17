@@ -22,6 +22,9 @@ const logger = require('./utils/logger');
 const {sequelize} = require('./database/models');
 const routes = require('./routes');
 const {errorHandler,notFound} = require('./middleware/errorHandler');
+const { tripModeManager } = require('./services/tripModeManager.service');
+const { scheduleNightlyLearning } = require('./queues/preferenceLearningQueue');
+const { scheduleDailyCheckIn } = require('./queues/checkInQueue');
 
 // ============================================================================
 // CORS ORIGIN ALLOWLIST
@@ -165,6 +168,26 @@ async function startServer() {
         // db:migrate` on a teammate's machine (or in CI/production,
         // where sync never ran) produces a different schema. Migrations
         // are the single source of truth now, in every environment.
+        // Phase 2 fix (found while building the Phase 2 learning loop,
+        // not part of it): tripModeManager.start() -- the daily cron
+        // that auto-activates/deactivates trips -- was never actually
+        // called anywhere. It only appeared inside a comment block at
+        // the bottom of tripModeManager.service.js labeled "usage
+        // example"; the cron job itself has never run. Starting it here
+        // for real.
+        tripModeManager.start();
+
+        // Phase 2: register the nightly preference-learning job and the
+        // daily check-in email job. Both are repeatable Bull jobs (see
+        // src/queues/preferenceLearningQueue.js and
+        // src/queues/checkInQueue.js); Bull dedups repeatable jobs by
+        // their cron pattern + jobId, so calling these on every boot is
+        // safe and does not create duplicate schedules. The actual work
+        // runs in the worker process (npm run worker), not here -- this
+        // only registers when it should run.
+        await scheduleNightlyLearning();
+        await scheduleDailyCheckIn();
+
         //Start the server
         server.listen(PORT,HOST,() => {
             logger.info(`Server is running on http://${HOST}:${PORT} in ${process.env.NODE_ENV} mode. /n API Endpoint at http://${HOST}:${PORT}/api/v1`);
@@ -190,6 +213,7 @@ const shutdown =async(signal) => {
 
     server.close( async() => {
         logger.info('Closed out remaining connections.');
+        tripModeManager.stop();
         await sequelize.close();
         logger.info('Database connection closed.');
         process.exit(0);

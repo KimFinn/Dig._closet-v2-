@@ -7,6 +7,7 @@ const clothesRoutes = require('./clothes.routes');
 const outfitRoutes = require('./outfit.routes');
 const tripRoutes = require('./trip.routes');
 const preferenceRoutes = require('./userPreference.routes');
+const notificationRoutes = require('./notification.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -14,6 +15,7 @@ router.use('/clothes',clothesRoutes);
 router.use('/outfit',outfitRoutes);
 router.use('/trip',tripRoutes);
 router.use("/UserPreference",preferenceRoutes);
+router.use('/notifications', notificationRoutes);
 
 // API info endpoint
 router.get('/', (req, res) => {

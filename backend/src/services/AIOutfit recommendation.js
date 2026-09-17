@@ -14,10 +14,13 @@ const {
     OutfitRating,
     ClothesAttributes,
     RecommendationLog,
-    FashionTrends
+    FashionTrends,
+    LearnedPreferences
 }
  = require("../database/models");
 const WeatherService = require("../services/weather.service");
+const logger = require("../utils/logger");
+const { Op } = require("sequelize");
 
 // ============================================================================
 // ✅ NEURAL PREFERENCE LEARNER
@@ -43,7 +46,38 @@ class NeuralPreferenceLearner {
     const ratings = await OutfitRating.findAll({ where: { userId } });
 
     if (interactions.length === 0) {
-      return this._getDefaultPreferences(userId);
+      // Still write a snapshot (marked cold-start) even with zero
+      // interactions -- otherwise getRecommendationPreferences() never
+      // finds a row for this user and re-enqueues a backfill job on
+      // every single request forever, which is exactly the kind of
+      // unnecessary repeated DB/queue traffic we're trying to avoid.
+      // One cold-start snapshot per inactive user, not one attempt per
+      // request.
+      const coldStart = await this._getColdStartPreferences(userId);
+      // findOrCreate + update, not .upsert() -- upsert's default
+      // ON CONFLICT target is the primary key, and `id` here is always a
+      // freshly generated UUID (never passed in), so it would never
+      // actually conflict and would insert a duplicate row per call
+      // instead of updating the existing one.
+      const [snapshotRow] = await LearnedPreferences.findOrCreate({
+        where: { userId },
+        defaults: {
+          userId,
+          preferences: coldStart,
+          embedding: null,
+          interactionCount: 0,
+          isColdStart: true,
+          modelVersion: 'v1.0-neural',
+          lastLearnedAt: new Date(),
+        },
+      });
+      await snapshotRow.update({
+        preferences: coldStart,
+        interactionCount: 0,
+        isColdStart: true,
+        lastLearnedAt: new Date(),
+      });
+      return coldStart;
     }
 
     const preferences = {
@@ -90,13 +124,19 @@ class NeuralPreferenceLearner {
     }
 
     for (const rating of ratings) {
-      const outfit = await OutfitCombination.findByPk(rating.outfitId);
+      // Phase 2 fix: this called `OutfitCombination.findByPk(...)` --
+      // OutfitCombination is never imported or defined anywhere in this
+      // file (the real model, already imported above, is `Outfit`, and
+      // its item-id array field is `items`, not `itemIds`). This threw a
+      // ReferenceError the moment any user had OutfitRating rows -- silent
+      // until now because nothing had exercised this path live yet.
+      const outfit = await Outfit.findByPk(rating.outfitId);
       if (!outfit) continue;
 
       const ratingScore = (rating.overallRating - 1) / 4;
       const weight = ratingScore * 2.0;
 
-      const items = await this._getItemsFromIds(outfit.itemIds);
+      const items = await this._getItemsFromIds(outfit.items);
       for (const item of items) {
         await this._updateAttributePreference(preferences, item, weight);
       }
@@ -107,10 +147,151 @@ class NeuralPreferenceLearner {
     const userEmbedding = await this._generateUserEmbedding(userId, preferences, interactions);
     this.userEmbeddingCache.set(userId, userEmbedding);
 
-    await this._savePreferences(userId, preferences, userEmbedding);
+    await this._savePreferences(userId, preferences, userEmbedding, interactions.length);
 
     console.log(`[PreferenceLearner] Learned preferences from ${interactions.length} interactions`);
     return preferences;
+  }
+
+  /**
+   * Phase 2: fast path used by recommendOutfits() at request time.
+   * learnUserPreferences() above is the expensive full relearn (up to
+   * 5000 interactions re-queried, an item lookup per interaction) --
+   * that now only runs from the nightly job
+   * (src/queues/preferenceLearningQueue.js), never inline in a request.
+   *
+   * This reads the persisted snapshot (one indexed query) and, if it
+   * exists, applies a cheap same-day adjustment from only the
+   * interactions logged since the snapshot was learned -- typically a
+   * handful of rows, not thousands. Brand-new users with no snapshot yet
+   * get cold-start defaults seeded from their onboarding survey instead
+   * of generic zeros, and are queued for an immediate one-off learn so
+   * they have a real snapshot by their next request.
+   */
+  async getRecommendationPreferences(userId) {
+    const snapshot = await LearnedPreferences.findOne({ where: { userId } });
+
+    if (!snapshot) {
+      logger.info('No learned-preferences snapshot yet, using cold-start defaults', { userId });
+      // Fire-and-forget: don't make the user's request wait on a full
+      // learn. Queued lazily (require() here, not at module load) to
+      // avoid a circular require between this service and the queue
+      // module, which itself doesn't need this file.
+      try {
+        const { enqueueLearnPreferencesJob } = require('../queues/preferenceLearningQueue');
+        await enqueueLearnPreferencesJob({ userId, reason: 'cold-start-backfill' });
+      } catch (error) {
+        logger.warn('Could not enqueue cold-start preference learning job', { userId, error: error.message });
+      }
+      return this._getColdStartPreferences(userId);
+    }
+
+    const basePreferences = snapshot.preferences || {};
+    const sinceLearned = snapshot.lastLearnedAt || snapshot.updatedAt;
+
+    return this._applySameDayAdjustment(userId, basePreferences, sinceLearned);
+  }
+
+  /**
+   * Cold-start defaults (PRD: "derived from onboarding profile, not
+   * generic"). Seeds from the survey the user already filled in at
+   * signup (UserPreferences -- style persona, preferred colors/fabrics/
+   * brands, budget) instead of empty maps, and biases explorationRate
+   * higher than the steady-state default so early recommendations range
+   * wider while there's no real interaction history to learn from yet.
+   */
+  async _getColdStartPreferences(userId) {
+    const onboarding = await UserPreferences.findOne({ where: { userId } });
+
+    const preferences = {
+      colors: {},
+      fabrics: {},
+      styles: {},
+      fits: {},
+      patterns: {},
+      occasions: {},
+      explorationRate: 0.3,
+      diversityPreference: 0.5,
+      trendSensitivity: 0.3,
+      formalityBias: 0.0,
+      avoidedColors: {},
+      avoidedFabrics: {},
+      avoidedStyles: {},
+      isNewUser: true,
+      isColdStart: true,
+    };
+
+    if (onboarding) {
+      const seedWeight = 0.6; // positive prior, not so strong it can't be overridden by real behavior
+      for (const color of onboarding.preferredColors || []) {
+        preferences.colors[color] = seedWeight;
+      }
+      for (const fabric of onboarding.preferredFabrics || []) {
+        preferences.fabrics[fabric] = seedWeight;
+      }
+      for (const color of onboarding.avoidColors || []) {
+        preferences.avoidedColors[color] = seedWeight;
+      }
+      for (const fabric of onboarding.avoidFabrics || []) {
+        preferences.avoidedFabrics[fabric] = seedWeight;
+      }
+      if (onboarding.stylePersona) {
+        preferences.styles[onboarding.stylePersona] = seedWeight;
+      }
+      if (onboarding.fitPreference) {
+        preferences.fits[onboarding.fitPreference] = seedWeight;
+      }
+    }
+
+    return preferences;
+  }
+
+  /**
+   * Cheap same-day delta on top of a nightly snapshot: only looks at
+   * interactions created after the snapshot was learned (bounded to
+   * "since last night", not the user's whole history), and nudges a
+   * shallow copy of the snapshot's normalized scores rather than
+   * recomputing them from scratch. Never persisted -- purely
+   * per-request, so a burst of activity today doesn't need a DB write
+   * to affect the very next recommendation.
+   */
+  async _applySameDayAdjustment(userId, basePreferences, since) {
+    const where = { userId };
+    if (since) {
+      where.createdAt = { [Op.gt]: since };
+    }
+
+    const recentInteractions = await UserInteraction.findAll({
+      where,
+      order: [['createdAt', 'DESC']],
+      limit: 100, // same-day activity only -- a real cap, not the 5000 the nightly job uses
+    });
+
+    if (recentInteractions.length === 0) {
+      return basePreferences;
+    }
+
+    const adjusted = JSON.parse(JSON.stringify(basePreferences));
+    adjusted.colors = adjusted.colors || {};
+    adjusted.fabrics = adjusted.fabrics || {};
+    adjusted.styles = adjusted.styles || {};
+    adjusted.fits = adjusted.fits || {};
+    adjusted.patterns = adjusted.patterns || {};
+    adjusted.occasions = adjusted.occasions || {};
+
+    for (const interaction of recentInteractions) {
+      const item = interaction.itemId ? await Clothes.findByPk(interaction.itemId) : null;
+      if (!item) continue;
+
+      const actionWeight = this._getActionWeight(interaction.action);
+      // Today's signal counts for less than the full-history nightly
+      // learn's own weighting -- it's a nudge, not a replacement.
+      const nudgeWeight = actionWeight * 0.3;
+      await this._updateAttributePreference(adjusted, item, nudgeWeight);
+    }
+
+    adjusted.isSameDayAdjusted = true;
+    return adjusted;
   }
 
   _calculateRecencyWeight(timestamp) {
@@ -225,9 +406,9 @@ class NeuralPreferenceLearner {
     return embedding;
   }
 
-  async _savePreferences(userId, preferences, userEmbedding) {
+  async _savePreferences(userId, preferences, userEmbedding, interactionCount = 0) {
     const existingPrefs = await UserPreferences.findOne({ where: { userId } });
-    
+
     if (existingPrefs) {
       await existingPrefs.update({
         preferredColors: Object.keys(preferences.colors).slice(0, 10),
@@ -236,12 +417,38 @@ class NeuralPreferenceLearner {
         avoidFabrics: Object.keys(preferences.avoidedFabrics).slice(0, 5),
       });
     }
+
+    // Phase 2: the full computed object (previously only 4 of ~15 fields
+    // survived, and only into the onboarding-survey table above) now
+    // persists in full here -- this is what getRecommendationPreferences()
+    // reads back at request time instead of recomputing live.
+    const [snapshot] = await LearnedPreferences.findOrCreate({
+      where: { userId },
+      defaults: {
+        userId,
+        preferences,
+        embedding: userEmbedding,
+        interactionCount,
+        isColdStart: false,
+        modelVersion: 'v1.0-neural',
+        lastLearnedAt: new Date(),
+      },
+    });
+    await snapshot.update({
+      preferences,
+      embedding: userEmbedding,
+      interactionCount,
+      isColdStart: false,
+      modelVersion: 'v1.0-neural',
+      lastLearnedAt: new Date(),
+    });
   }
 
   async _getOutfitItems(outfitId) {
-    const outfit = await OutfitCombination.findByPk(outfitId);
+    // Phase 2 fix: same OutfitCombination/itemIds bug as above.
+    const outfit = await Outfit.findByPk(outfitId);
     if (!outfit) return null;
-    return await this._getItemsFromIds(outfit.itemIds);
+    return await this._getItemsFromIds(outfit.items);
   }
 
   async _getItemsFromIds(itemIds) {
@@ -795,14 +1002,24 @@ class DiversityEngine {
   applyDiversityRanking(scoredOutfits, userPreferences, count = 5) {
     scoredOutfits.sort((a, b) => b.score.totalScore - a.score.totalScore);
 
+    // Phase 2 fix: explorationRate/diversityPreference were learned per
+    // user (NeuralPreferenceLearner) but never actually reached here --
+    // this engine used only its own hardcoded constructor value
+    // (0.15, set once at service startup) no matter who was asking.
+    // Falls back to the constructor default for a user with no
+    // preferences object at all (shouldn't happen now that cold-start
+    // always returns one, but kept as a safety net).
+    const explorationRate = userPreferences?.explorationRate ?? this.explorationRate;
+    const diversityPreference = userPreferences?.diversityPreference ?? 0.5;
+
     const selected = [];
-    const exploitCount = Math.floor(count * (1 - this.explorationRate));
+    const exploitCount = Math.floor(count * (1 - explorationRate));
     const topOutfits = scoredOutfits.slice(0, exploitCount);
     selected.push(...topOutfits);
 
     const remaining = scoredOutfits.slice(exploitCount);
     const exploreCount = count - exploitCount;
-    const diverseOutfits = this._selectDiverseOutfits(remaining, exploreCount, selected);
+    const diverseOutfits = this._selectDiverseOutfits(remaining, exploreCount, selected, diversityPreference);
     selected.push(...diverseOutfits);
 
     for (let i = exploitCount; i < selected.length; i++) {
@@ -813,14 +1030,19 @@ class DiversityEngine {
     return selected.slice(0, count);
   }
 
-  _selectDiverseOutfits(outfits, count, alreadySelected) {
+  _selectDiverseOutfits(outfits, count, alreadySelected, diversityPreference = 0.5) {
     const selectedColors = new Set(alreadySelected.flatMap(o => o.items.map(i => i.color)));
 
     for (const outfit of outfits) {
       const colors = outfit.items.map(i => i.color);
       const colorNovelty = colors.filter(c => !selectedColors.has(c)).length / colors.length;
       outfit.diversityScore = colorNovelty;
-      outfit.explorationScore = outfit.diversityScore * 0.6 + outfit.score.totalScore * 0.4;
+      // Phase 2 fix: diversityPreference was computed by the learner but
+      // never read here -- this blend was a fixed 0.6/0.4 for every
+      // user. A user with a low diversityPreference now gets
+      // exploration picks that stay closer to their normal score;
+      // a high one leans further into novelty.
+      outfit.explorationScore = outfit.diversityScore * diversityPreference + outfit.score.totalScore * (1 - diversityPreference);
     }
 
     outfits.sort((a, b) => b.explorationScore - a.explorationScore);
@@ -901,10 +1123,15 @@ class AIOutfitRecommendationService {
         };
       }
 
-      // ✅ STEP 3: LEARN USER PREFERENCES
-      console.log(`📊 Learning user preferences...`);
-      const userPreferences = await this.preferenceLearner.learnUserPreferences(userId);
-      console.log(`✓ Learned preferences`);
+      // ✅ STEP 3: GET USER PREFERENCES
+      // Phase 2 fix: this used to call learnUserPreferences() directly,
+      // recomputing the full model (up to 5000 interactions re-queried,
+      // an item lookup per interaction) on every single recommendation
+      // request. It now reads the nightly job's persisted snapshot plus
+      // a cheap same-day delta -- see getRecommendationPreferences().
+      console.log(`📊 Loading learned preferences...`);
+      const userPreferences = await this.preferenceLearner.getRecommendationPreferences(userId);
+      console.log(`✓ Preferences loaded`);
 
       // ✅ STEP 4: GET WEATHER DATA
       let weather = options.weather;
@@ -977,6 +1204,33 @@ class AIOutfitRecommendationService {
 
       const duration = Date.now() - startTime;
       console.log(`\n✅ Recommendations generated in ${duration}ms\n`);
+
+      // Phase 2: RecommendationLog was fully defined in the schema but
+      // never actually written to anywhere -- swap detection and outfit-
+      // regret detection both need a record of what was *suggested* to
+      // compare against what was ultimately worn. This is the only
+      // write; the controller layer only calls recommendOutfits() at
+      // all on a cache miss (see outfit.controller.js's
+      // getTodayOutfit/getTomorrowOutfit/getCustomOutfit), so a cached
+      // response never causes a duplicate log row. Wrapped in try/catch
+      // so a logging failure can never fail the actual recommendation
+      // response the user is waiting on.
+      try {
+        await RecommendationLog.create({
+          userId,
+          occasion,
+          recommendedOutfits: rankedOutfits.map((o) => ({
+            itemIds: o.items.map((i) => i.id),
+            totalScore: o.score?.totalScore ?? null,
+            isExploration: !!o.isExploration,
+          })),
+          context,
+          userPreferencesSnapshot: userPreferences,
+          modelVersion: 'v1.0-neural',
+        });
+      } catch (logError) {
+        logger.warn('Failed to write RecommendationLog', { userId, error: logError.message });
+      }
 
       return {
         outfits: rankedOutfits,

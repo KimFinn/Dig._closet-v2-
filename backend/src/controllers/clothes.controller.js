@@ -23,6 +23,7 @@ const logger = require('../utils/logger');
 const cloudinary = require('../configurations/cloudinary');
 const { MCPFashionTagger, MCPConfig, VisionProvider } = require('../services/fashionTagger');
 const { enqueueTaggingJob } = require('../queues/taggingQueue');
+const { analyzeWearEvent } = require('../services/outfitAnalytics.service');
 const redis = require('redis');
 const Joi = require('joi'); // For request validation
 
@@ -1087,10 +1088,18 @@ class ClothesController {
             // recommendation.js's _scoreRecency) reads lastWornAt directly
             // -- but without this row, a solo item worn outside any
             // outfit was invisible to the event log entirely.
+            // Phase 2: swap/regret detection -- pure DB reads over
+            // today's RecommendationLog/UserInteraction rows, no paid
+            // API calls. Computed before the row below is created so it
+            // can be folded straight into that row's context instead of
+            // needing a second write.
+            const analytics = await analyzeWearEvent(userId, { itemIds: [item.id] });
+
             await UserInteraction.create({
                 userId,
                 itemId: item.id,
                 action: 'wear',
+                context: Object.keys(analytics).length > 0 ? analytics : undefined,
             });
 
             // Invalidate cache

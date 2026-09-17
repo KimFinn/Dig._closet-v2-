@@ -1584,6 +1584,57 @@ FashionTrends.getCurrentTrends = function() {
     });
 };
 
+// Phase 2: snapshot table for NeuralPreferenceLearner's output (see
+// migration 20260918000001-create-learned-preferences.js for the full
+// rationale). One row per user, upserted by the nightly learning job.
+const LearnedPreferences = sequelize.define('LearnedPreferences', {
+    id: {
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
+        primaryKey: true
+    },
+    userId: {
+        type: DataTypes.UUID,
+        allowNull: false,
+        unique: true,
+        field: 'user_id',
+        references: { model: 'users', key: 'id' }
+    },
+    preferences: {
+        type: DataTypes.JSONB,
+        allowNull: false,
+        defaultValue: {}
+    },
+    embedding: {
+        type: DataTypes.JSONB,
+        allowNull: true
+    },
+    interactionCount: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+        field: 'interaction_count'
+    },
+    isColdStart: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+        field: 'is_cold_start'
+    },
+    modelVersion: {
+        type: DataTypes.STRING(50),
+        allowNull: true,
+        field: 'model_version'
+    },
+    lastLearnedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        field: 'last_learned_at'
+    }
+}, {
+    tableName: 'learned_preferences'
+});
+
 // Define Associations
 User.hasMany(Clothes,{foreignKey: 'user_id'});
 Clothes.belongsTo(User,{foreignKey: 'user_id'});
@@ -1593,6 +1644,19 @@ Outfit.belongsTo(User,{foreignKey: 'user_id'});
 
 User.hasMany(Trip,{foreignKey: 'user_id'});
 Trip.belongsTo(User,{foreignKey: 'user_id'});
+
+// Phase 2 fix (found live once tripModeManager's cron was actually
+// wired up in server.js -- see that fix's own comment): this alias
+// didn't exist at all. tripModeManager.service.js's deactivateEndedTrips
+// does `User.findAll({ include: [{ model: Trip, as: 'activeTrip' }] })`
+// and expects `user.activeTrip`, but with no such association defined
+// Sequelize throws "You've included an alias (activeTrip), but it does
+// not match the alias(es) defined in your association" on every call --
+// caught by that method's own try/catch, so it never crashed the
+// process, but it also meant not one ended trip has ever actually been
+// auto-completed by that job. `active_trip_id` on User already points
+// at a Trip row, so this is a straightforward belongsTo.
+User.belongsTo(Trip, { foreignKey: 'active_trip_id', as: 'activeTrip' });
 
 User.hasOne(UserPreferences,{foreignKey: 'user_id'});
 UserPreferences.belongsTo(User,{foreignKey: 'user_id'});
@@ -1607,6 +1671,9 @@ Outfit.hasMany(OutfitRating, {foreignKey: 'outfit_id'});
 
 Clothes.hasOne(ClothesAttributes, {foreignKey: 'clothes_id'});
 
+User.hasOne(LearnedPreferences, {foreignKey: 'user_id'});
+LearnedPreferences.belongsTo(User, {foreignKey: 'user_id'});
+
 
 module.exports = {
     sequelize,
@@ -1619,5 +1686,6 @@ module.exports = {
     OutfitRating,
     ClothesAttributes,
     RecommendationLog,
-    FashionTrends
+    FashionTrends,
+    LearnedPreferences
 };

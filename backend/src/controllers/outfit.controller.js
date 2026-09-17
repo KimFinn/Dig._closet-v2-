@@ -21,6 +21,7 @@ const OutfitService = require("../services/outfitEngine");
 const OutfitRecommendationService = require("../services/AIOutfit recommendation");
 const WeatherService = require("../services/weather.service");
 const { Trip, UserInteraction, Outfit, OutfitRating } = require("../database/models");
+const { analyzeWearEvent } = require("../services/outfitAnalytics.service");
 const logger = require('../utils/logger');
 // Phase 0 fix: express-validator's `validationResult` was imported here
 // but never actually called anywhere in this file — every write path
@@ -1408,12 +1409,20 @@ class OutfitController {
             // Mark as worn
             await outfit.markAsWorn();
 
+            // Phase 2: swap/regret detection -- see
+            // src/services/outfitAnalytics.service.js. Pure DB reads over
+            // today's rows, no paid API calls.
+            const analytics = await analyzeWearEvent(userId, {
+                itemIds: Array.isArray(outfit.items) ? outfit.items : [],
+                outfitId,
+            });
+
             // Track interaction
             await UserInteraction.create({
                 userId,
                 outfitId,
                 action: 'wear',
-                context: { date: new Date() }
+                context: { date: new Date(), ...analytics }
             });
 
             // Invalidate caches

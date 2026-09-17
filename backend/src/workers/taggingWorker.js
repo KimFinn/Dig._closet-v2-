@@ -16,11 +16,22 @@
 require('dotenv').config();
 const axios = require('axios');
 const redis = require('redis');
+const { Op, fn, col } = require('sequelize');
 
 const logger = require('../utils/logger');
-const { Clothes } = require('../database/models');
+const { Clothes, UserInteraction } = require('../database/models');
 const { taggingQueue } = require('../queues/taggingQueue');
 const { MCPFashionTagger, MCPConfig, VisionProvider } = require('../services/fashionTagger');
+// Phase 2: the nightly preference-learning job and the daily check-in
+// email job both run in this same process for now, alongside tagging.
+// Volume for both is low (once/day each, DB-only or a handful of
+// emails) so a dedicated process per job type would just be more things
+// to deploy and keep running for no real benefit yet -- split them out
+// once either one's workload actually grows enough to compete with
+// tagging for this process's resources.
+const { preferenceLearningQueue, ACTIVE_WINDOW_DAYS, NIGHTLY_CONCURRENCY } = require('../queues/preferenceLearningQueue');
+const { checkInQueue, processDailyCheckIn } = require('../queues/checkInQueue');
+const { aiOutfitService } = require('../services/AIOutfit recommendation');
 
 const CONCURRENCY = parseInt(process.env.TAGGING_WORKER_CONCURRENCY || '3', 10);
 
@@ -174,11 +185,88 @@ async function processTaggingJob(job) {
 taggingQueue.process(CONCURRENCY, processTaggingJob);
 logger.info(`Tagging worker started (concurrency: ${CONCURRENCY})`);
 
+// ============================================================================
+// Phase 2: preference-learning jobs
+// ============================================================================
+
+/** Runs `items` through `handler` with at most `limit` in flight at once. */
+async function runWithConcurrency(items, limit, handler) {
+  const results = [];
+  for (let i = 0; i < items.length; i += limit) {
+    const chunk = items.slice(i, i + limit);
+    const chunkResults = await Promise.allSettled(chunk.map(handler));
+    results.push(...chunkResults);
+  }
+  return results;
+}
+
+preferenceLearningQueue.process('learn-one', 2, async (job) => {
+  const { userId, reason } = job.data;
+  logger.info('Learning preferences for one user', { jobId: job.id, userId, reason });
+  await aiOutfitService.preferenceLearner.learnUserPreferences(userId);
+  return { success: true };
+});
+
+preferenceLearningQueue.process('nightly-learn-all', 1, async (job) => {
+  const windowStart = new Date(Date.now() - ACTIVE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+
+  // "Active" = logged at least one interaction in the window -- keeps
+  // this nightly pass proportional to real usage instead of scanning
+  // every account that ever signed up.
+  const rows = await UserInteraction.findAll({
+    where: { createdAt: { [Op.gte]: windowStart } },
+    attributes: [[fn('DISTINCT', col('user_id')), 'userId']],
+    raw: true,
+  });
+  const activeUserIds = rows.map((r) => r.userId).filter(Boolean);
+
+  logger.info('Nightly preference-learning run starting', {
+    jobId: job.id,
+    activeUserCount: activeUserIds.length,
+    windowDays: ACTIVE_WINDOW_DAYS,
+    concurrency: NIGHTLY_CONCURRENCY,
+  });
+
+  const results = await runWithConcurrency(activeUserIds, NIGHTLY_CONCURRENCY, async (userId) => {
+    try {
+      await aiOutfitService.preferenceLearner.learnUserPreferences(userId);
+    } catch (error) {
+      // One user's bad data (or a transient DB hiccup) shouldn't stop
+      // the rest of the run -- logged and skipped, not thrown.
+      logger.warn('Nightly preference learning failed for one user', { userId, error: error.message });
+      throw error; // still marks this settle() as rejected for the summary count below
+    }
+  });
+
+  const succeeded = results.filter((r) => r.status === 'fulfilled').length;
+  const failed = results.filter((r) => r.status === 'rejected').length;
+  logger.info('Nightly preference-learning run complete', { succeeded, failed, total: activeUserIds.length });
+
+  return { succeeded, failed, total: activeUserIds.length };
+});
+
+logger.info('Preference-learning processors started (learn-one concurrency: 2, nightly-learn-all concurrency: 1)');
+
+// ============================================================================
+// Phase 2: daily check-in job
+// ============================================================================
+
+checkInQueue.process('daily-checkin-run', 1, async (job) => {
+  logger.info('Daily check-in run starting', { jobId: job.id });
+  return await processDailyCheckIn();
+});
+
+logger.info('Daily check-in processor started');
+
 process.on('SIGTERM', async () => {
   await taggingQueue.close();
+  await preferenceLearningQueue.close();
+  await checkInQueue.close();
   process.exit(0);
 });
 process.on('SIGINT', async () => {
   await taggingQueue.close();
+  await preferenceLearningQueue.close();
+  await checkInQueue.close();
   process.exit(0);
 });
